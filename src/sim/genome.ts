@@ -34,6 +34,9 @@ export const INPUT_NAMES = [
   'light ∇',
   'nutrient ∇',
   'sulfide ∇',
+  'in water',
+  'hydration',
+  'rain',
 ] as const;
 
 export const OUTPUT_NAMES = ['thrust', 'turn', 'eat', 'float', 'glow'] as const;
@@ -71,6 +74,9 @@ export const IN = {
   LightGrad: 26,
   NutGrad: 27,
   SulfGrad: 28,
+  InWater: 29,
+  Hydration: 30,
+  Rain: 31,
 } as const;
 
 export const OUT = { Thrust: 0, Turn: 1, Eat: 2, Float: 3, Glow: 4 } as const;
@@ -88,6 +94,7 @@ export const A = {
   sensor: 5,
   vacuole: 6,
   storage: 7,
+  root: 8,
 } as const;
 
 export const ALLOC_NAMES = [
@@ -99,6 +106,7 @@ export const ALLOC_NAMES = [
   'Senses',
   'Gas vacuole',
   'Storage',
+  'Roots & cuticle',
 ] as const;
 
 export const ALLOC_COLORS = [
@@ -110,9 +118,10 @@ export const ALLOC_COLORS = [
   '#f472b6',
   '#7dd3fc',
   '#fde68a',
+  '#c08a57',
 ] as const;
 
-export const NALLOC = 8;
+export const NALLOC = 9;
 /** Share of the cell that is plain cytoplasm; keeps fractions below 1. */
 const CYTOPLASM = 0.6;
 
@@ -133,6 +142,7 @@ export const CT = {
   Eye: 6,
   Float: 7,
   Storage: 8,
+  Root: 9,
 } as const;
 
 export const CELL_TYPE_NAMES = [
@@ -145,6 +155,7 @@ export const CELL_TYPE_NAMES = [
   'Eye cell',
   'Float cell',
   'Fat cell',
+  'Root cell',
 ] as const;
 
 export const CELL_TYPE_COLORS = ['#c4b5fd', ...ALLOC_COLORS] as const;
@@ -247,7 +258,17 @@ export function cloneGenome(g: Genome): Genome {
 // Seed archetypes — starting points; evolution takes it from there.
 // ---------------------------------------------------------------------------
 
-export type Archetype = 'photo' | 'chemo' | 'grazer' | 'hunter' | 'scavenger' | 'colony' | 'stalker' | 'random';
+export type Archetype =
+  | 'photo'
+  | 'chemo'
+  | 'grazer'
+  | 'hunter'
+  | 'scavenger'
+  | 'colony'
+  | 'stalker'
+  | 'pioneer'
+  | 'plant'
+  | 'random';
 
 export const ARCHETYPE_LABELS: Record<Archetype, string> = {
   photo: 'Phototroph (eats light)',
@@ -257,6 +278,8 @@ export const ARCHETYPE_LABELS: Record<Archetype, string> = {
   scavenger: 'Scavenger (eats detritus)',
   colony: 'Algal colony (multicellular)',
   stalker: 'Stalker (multicellular predator)',
+  pioneer: 'Intertidal pioneer (tolerates drying)',
+  plant: 'Land plant (roots, stem, leaves)',
   random: 'Random protocell',
 };
 
@@ -282,13 +305,15 @@ const SIG_BASE: Record<Exclude<Archetype, 'random'>, number[]> = {
   grazer: [0.3, 0.3, 0.8],
   hunter: [0.8, 0.8, 0.8],
   scavenger: [0.5, 0.2, 0.9],
+  pioneer: [0.15, 0.6, 0.6],
+  plant: [0.1, 0.55, 0.15],
   colony: [0.1, 0.9, 0.5],
   stalker: [0.9, 0.5, 0.1],
 };
 
 const PRESETS: Record<Exclude<Archetype, 'random'>, Preset> = {
   photo: {
-    alloc: [0.9, 0.02, 0.02, 0.15, 0.05, 0.05, 0.45, 0.2],
+    alloc: [0.9, 0.02, 0.02, 0.15, 0.05, 0.05, 0.45, 0.2, 0.01],
     div: 6,
     temp: 20,
     tol: 12,
@@ -302,7 +327,7 @@ const PRESETS: Record<Exclude<Archetype, 'random'>, Preset> = {
     ],
   },
   chemo: {
-    alloc: [0.02, 0.9, 0.03, 0.2, 0.2, 0.1, 0.02, 0.3],
+    alloc: [0.02, 0.9, 0.03, 0.2, 0.2, 0.1, 0.02, 0.3, 0.01],
     div: 8,
     temp: 28,
     tol: 20,
@@ -315,7 +340,7 @@ const PRESETS: Record<Exclude<Archetype, 'random'>, Preset> = {
     ],
   },
   grazer: {
-    alloc: [0.08, 0.02, 0.6, 0.45, 0.05, 0.5, 0.3, 0.2],
+    alloc: [0.08, 0.02, 0.6, 0.45, 0.05, 0.5, 0.3, 0.2, 0.01],
     div: 12,
     temp: 18,
     tol: 12,
@@ -332,7 +357,7 @@ const PRESETS: Record<Exclude<Archetype, 'random'>, Preset> = {
     ],
   },
   hunter: {
-    alloc: [0.02, 0.02, 0.85, 0.65, 0.12, 0.5, 0.15, 0.3],
+    alloc: [0.02, 0.02, 0.85, 0.65, 0.12, 0.5, 0.15, 0.3, 0.01],
     div: 13,
     temp: 16,
     tol: 12,
@@ -349,7 +374,7 @@ const PRESETS: Record<Exclude<Archetype, 'random'>, Preset> = {
     ],
   },
   scavenger: {
-    alloc: [0.02, 0.05, 0.6, 0.35, 0.1, 0.4, 0.02, 0.3],
+    alloc: [0.02, 0.05, 0.6, 0.35, 0.1, 0.4, 0.02, 0.3, 0.01],
     div: 8,
     temp: 10,
     tol: 12,
@@ -366,7 +391,7 @@ const PRESETS: Record<Exclude<Archetype, 'random'>, Preset> = {
   },
   // Volvox-like: a rosette of photocytes around a core, kept afloat by a float cell
   colony: {
-    alloc: [0.6, 0.02, 0.02, 0.2, 0.05, 0.1, 0.3, 0.3],
+    alloc: [0.6, 0.02, 0.02, 0.2, 0.05, 0.1, 0.3, 0.3, 0.01],
     div: 20,
     temp: 19,
     tol: 12,
@@ -390,7 +415,7 @@ const PRESETS: Record<Exclude<Archetype, 'random'>, Preset> = {
   },
   // a hunter with a mouth at the front, two forward eyes, a shell and a motor tail
   stalker: {
-    alloc: [0.02, 0.02, 0.45, 0.3, 0.1, 0.3, 0.2, 0.4],
+    alloc: [0.02, 0.02, 0.45, 0.3, 0.1, 0.3, 0.2, 0.4, 0.01],
     div: 30,
     temp: 16,
     tol: 12,
@@ -413,6 +438,38 @@ const PRESETS: Record<Exclude<Archetype, 'random'>, Preset> = {
       [4, 180, CT.Motor, 0.65],
       [0, 90, CT.Armor, 0.7],
       [0, 270, CT.Armor, 0.7],
+    ],
+  },
+  // a tough, waxy alga of the tide pools: photosynthesises in water and survives being stranded
+  pioneer: {
+    alloc: [0.75, 0.02, 0.02, 0.12, 0.15, 0.05, 0.2, 0.35, 0.55],
+    div: 7,
+    temp: 18,
+    tol: 15,
+    hue: 0.22,
+    wires: [
+      [IN.Bias, O(OUT.Thrust), 0.15],
+      [IN.Depth, O(OUT.Float), 1.5],
+      [IN.Light, O(OUT.Float), -0.8],
+      [IN.LightGrad, O(OUT.Turn), 1.0],
+      [IN.InWater, O(OUT.Thrust), 0.4],
+    ],
+  },
+  // roots below, a woody stem, leaves above; on land it grows towards the light
+  plant: {
+    alloc: [0.45, 0.02, 0.02, 0.02, 0.2, 0.05, 0.02, 0.35, 0.5],
+    div: 22,
+    temp: 16,
+    tol: 16,
+    hue: 0.28,
+    wires: [[IN.Bias, O(OUT.Thrust), -1]],
+    body: [
+      [0, 180, CT.Root, 0.8],
+      [1, 180, CT.Root, 0.6],
+      [0, 0, CT.Armor, 0.65],
+      [3, -35, CT.Photo, 0.85],
+      [3, 35, CT.Photo, 0.85],
+      [3, 0, CT.Photo, 0.8],
     ],
   },
 };
@@ -556,7 +613,7 @@ function mutateBody(g: Genome, rng: Rng, m: number) {
   for (const c of body) {
     if (rng.chance(pm(0.1, m))) c.angle += rng.gauss() * 0.3;
     if (rng.chance(pm(0.08, m))) c.size = clamp(c.size * Math.exp(rng.gauss() * 0.12), 0.45, 1.5);
-    if (rng.chance(pm(0.02, m))) c.type = 1 + rng.int(8);
+    if (rng.chance(pm(0.02, m))) c.type = 1 + rng.int(9);
   }
   if (body.length < MAX_BODY && rng.chance(pm(0.03, m))) {
     if (body.length > 0 && rng.chance(0.35)) {
@@ -567,7 +624,7 @@ function mutateBody(g: Genome, rng: Rng, m: number) {
       body.push({
         parent: rng.int(body.length + 1),
         angle: rng.range(-Math.PI, Math.PI),
-        type: 1 + rng.int(8),
+        type: 1 + rng.int(9),
         size: rng.range(0.55, 1.1),
       });
     }
@@ -638,6 +695,7 @@ export function genomeRole(frac: ArrayLike<number>): string {
   const mouth = frac[A.mouth];
   const max = Math.max(photo, chemo, mouth);
   if (max < 0.08) return 'Protocell';
+  if (frac[A.root] > 0.14) return max === photo ? 'Land plant' : max === mouth ? 'Land forager' : 'Land dweller';
   if (max === photo) return mouth > photo * 0.6 ? 'Mixotroph' : 'Phototroph';
   if (max === chemo) return 'Chemotroph';
   return 'Heterotroph';

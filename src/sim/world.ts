@@ -1,4 +1,6 @@
-import { Fields } from './fields';
+import { AIR_CELL, AIR_NX, AIR_NY } from './params';
+import { Atmosphere, airRowY, qsat } from './atmosphere';
+import { Fields, rowY } from './fields';
 import { A, Archetype, Genome, cloneGenome, makeGenome, mutate } from './genome';
 import { stepLife } from './life';
 import { Organism } from './organism';
@@ -7,15 +9,19 @@ import {
   CELL,
   DT,
   FIELD_EVERY,
+  GRID_TOP,
   GodParams,
   MAX_ORGS,
   MAX_PARTICLES,
   NX,
   NY,
+  SKY_H,
+  TIDE_AMP,
   WORLD_H,
   WORLD_W,
   defaultParams,
 } from './params';
+import { Soil } from './soil';
 import { Particles } from './particles';
 import { Rng, clamp } from './rng';
 import { SpatialGrid } from './spatial';
@@ -30,6 +36,8 @@ export type Selection =
   | { kind: 'vent'; id: number }
   | { kind: 'water'; x: number; y: number }
   | { kind: 'sky'; x: number; y: number }
+  | { kind: 'cloud'; x: number; y: number }
+  | { kind: 'land'; x: number; y: number }
   | { kind: 'floor'; x: number; y: number };
 
 export type EventKind = 'species' | 'extinct' | 'god' | 'info';
@@ -55,6 +63,8 @@ export class World {
   sunElev = 0;
 
   readonly fields = new Fields();
+  readonly atmosphere = new Atmosphere();
+  readonly soil = new Soil();
   readonly terrain = new Terrain();
   readonly particles = new Particles();
   orgs: Organism[] = [];
@@ -65,8 +75,8 @@ export class World {
   eventSeq = 0;
   nextOrgId = 1;
 
-  readonly orgGrid = new SpatialGrid(WORLD_W, WORLD_H, 40, MAX_ORGS * 2);
-  readonly partGrid = new SpatialGrid(WORLD_W, WORLD_H, 30, MAX_PARTICLES);
+  readonly orgGrid = new SpatialGrid(WORLD_W, WORLD_H, 40, MAX_ORGS * 2, -SKY_H);
+  readonly partGrid = new SpatialGrid(WORLD_W, WORLD_H, 30, MAX_PARTICLES, GRID_TOP);
   maxRadius = 10;
   private xs = new Float32Array(MAX_ORGS * 2);
   private ys = new Float32Array(MAX_ORGS * 2);
@@ -76,6 +86,7 @@ export class World {
   totalDied = 0;
   deathCauses = new Map<string, number>();
   archSpecies = new Map<Archetype, number>();
+  private lastBoltLog = -1e9;
 
   /** `blank` skips world generation (used when restoring a saved world). */
   constructor(
@@ -87,12 +98,13 @@ export class World {
     this.params = params ?? defaultParams();
     if (blank) return;
     this.terrain.generate(this.rng);
-    this.fields.init(this.terrain);
     this.updateSun();
-    // let the water settle a little before life appears
-    for (let i = 0; i < 40; i++) {
-      this.fields.step(DT * FIELD_EVERY, this.params, this.terrain, this.sunNow, this.rng);
-    }
+    const sl = this.tideLevel();
+    this.fields.init(this.terrain, sl);
+    this.atmosphere.init(this.terrain, sl, 16 + this.params.tempOffset);
+    this.initSoil();
+    // let the water and the weather settle a little before life appears
+    for (let i = 0; i < 60; i++) this.stepEnvironment(DT * FIELD_EVERY);
     this.seedSediment();
     this.seedLife(1);
     this.log(`World created from seed ${seed}. Primordial cells stir in the water.`, 'info');
@@ -119,15 +131,106 @@ export class World {
     stepLife(this);
     this.stepParticles();
     this.fields.shadeTicks++;
-    if (this.tick % FIELD_EVERY === 0) {
-      this.fields.step(DT * FIELD_EVERY, this.params, this.terrain, this.sunNow, this.rng);
-    }
+    this.soil.coverTicks++;
+    if (this.tick % FIELD_EVERY === 0) this.stepEnvironment(DT * FIELD_EVERY);
     if (this.tick % 60 === 0) {
       this.stats.record(this);
       if (this.params.autoSeed && this.orgs.length < 5 && this.tick % 600 === 0) {
         this.seedLife(0.4);
         this.log('Life re-emerged from the primordial soup.', 'info');
       }
+    }
+  }
+
+  /** Sea level (world y; smaller = higher water): two high tides a day. */
+  tideLevel(): number {
+    return -this.params.tides * TIDE_AMP * Math.cos(this.dayPhase * Math.PI * 4);
+  }
+
+  get seaLevel(): number {
+    return this.fields.seaLevel;
+  }
+
+  /** Soil starts wetter and richer in the lowlands. */
+  initSoil() {
+    const S = this.soil;
+    for (let i = 0; i < S.moisture.length; i++) {
+      const alt = this.fields.seaLevel - this.terrain.floorY(i * 8);
+      S.moisture[i] = Math.max(0.15, 0.6 - alt * 0.0012);
+      S.nutrient[i] = 0.6;
+      S.organic[i] = Math.max(0.05, 0.4 - alt * 0.001);
+    }
+  }
+
+  /** Sea, sky and soil — coupled — every FIELD_EVERY ticks. */
+  stepEnvironment(dtf: number) {
+    const F = this.fields;
+    const air = this.atmosphere;
+    const P = this.params;
+    F.setSeaLevel(this.tideLevel());
+    air.rebuild(this.terrain, F.seaLevel);
+    // the ground and sea surface warm the air above them
+    for (let i = 0; i < AIR_NX; i++) {
+      const x = (i + 0.5) * AIR_CELL;
+      if (air.overSea[i]) {
+        const wc = F.column(x);
+        const j = F.surfRow[wc];
+        air.surfaceT[i] = j >= 0 ? F.temp[j * NX + wc] : 15;
+      } else {
+        let t = 0;
+        let c = 0;
+        for (let k = -2; k <= 2; k++) {
+          const sc = this.soil.column(x + k * 8);
+          t += this.soil.temp[sc];
+          c++;
+        }
+        air.surfaceT[i] = t / c;
+      }
+    }
+    air.climateT = 14 + 2 * this.sunNow + P.tempOffset;
+    const strike = air.step(dtf, P, this.rng);
+    if (strike) this.lightningStrike(strike.x, strike.y);
+    // the air drives the sea: wind stress, air temperature, rain, cloud shade
+    for (let i = 0; i < NX; i++) {
+      const x = (i + 0.5) * CELL;
+      const ac = air.column(x);
+      F.windX[i] = air.surfaceWind(x) / 8;
+      // the sea trades heat with the air above it, anchored to the climate
+      F.airT[i] = 0.5 * air.surfaceAirT(x) + 0.5 * (13 + 9 * this.sunNow + P.tempOffset);
+      F.sunCol[i] = 1 - 0.7 * air.shade[ac];
+      const r = air.rainStep[ac];
+      if (r > 0 && air.overSea[ac]) F.addSurface(i, -0.4 * r, 0.004 * r);
+    }
+    F.step(dtf, P, this.terrain, this.sunNow, this.rng);
+    this.soil.step(dtf, P, this.terrain, air, F, this.sunNow);
+  }
+
+  /** Lightning: kills what it hits; over the sea it forges organic molecules, on land it fixes nitrogen. */
+  lightningStrike(x: number, y: number) {
+    let n = 0;
+    for (const o of this.orgs) {
+      if (!o.dead && Math.hypot(o.x - x, o.y - y) < 24 + o.radius) {
+        this.kill(o, 'Struck by lightning');
+        n++;
+      }
+    }
+    const overSea = this.terrain.floorY(x) > this.seaLevel + 2;
+    if (overSea) {
+      for (let i = 0; i < 10; i++) {
+        this.particles.add(x + this.rng.range(-20, 20), this.seaLevel + this.rng.range(2, 25), this.rng.range(0.5, 1.5), 0.2);
+      }
+    } else {
+      const c = this.soil.column(x);
+      this.soil.nutrient[c] += 0.5;
+    }
+    if (this.tick - this.lastBoltLog > 60 * 60) {
+      this.lastBoltLog = this.tick;
+      this.log(
+        overSea
+          ? `Lightning struck the sea${n ? `, killing ${n}` : ''}; its energy forged new organic molecules.`
+          : `Lightning struck the land${n ? `, killing ${n}` : ''}, fixing nitrogen into the soil.`,
+        'info',
+      );
     }
   }
 
@@ -215,6 +318,15 @@ export class World {
     o.cause = cause;
     const carbon = Math.max(0, o.mass + o.energy);
     const nu = o.nutrient + o.mass * BIO.NUT_RATIO;
+    if (o.onLand) {
+      // on land a body rots into the soil as humus
+      const c = this.soil.column(o.x);
+      this.soil.organic[c] += carbon;
+      this.soil.nutrient[c] += nu * 0.3;
+      this.soil.nutrient[Math.max(0, c - 1)] += nu * 0.35;
+      this.soil.nutrient[Math.min(this.soil.nutrient.length - 1, c + 1)] += nu * 0.35;
+      return;
+    }
     const multi = o.nCells > 1;
     const k = multi ? Math.min(o.nCells, 6) : clamp(Math.round(o.mass / 5), 1, 4);
     if (multi) o.updateWorldCells();
@@ -257,8 +369,18 @@ export class World {
       let y = P.y[i] + (F.sv + sink) * DT;
       if (x < 1) x = 1;
       else if (x > WORLD_W - 1) x = WORLD_W - 1;
-      if (y < 1) y = 1;
       const fy = t.floorY(x) - 1.5;
+      if (y < F.seaLevel + 1) {
+        if (fy < F.seaLevel + 2) {
+          // left high and dry by the tide: rots into the beach
+          const c = this.soil.column(x);
+          this.soil.organic[c] += Math.max(0, P.c[i]);
+          this.soil.nutrient[c] += Math.max(0, P.nu[i]);
+          P.remove(i);
+          continue;
+        }
+        y = F.seaLevel + 1;
+      }
       let resting = false;
       if (y >= fy) {
         y = fy;
@@ -317,34 +439,48 @@ export class World {
   seedSediment() {
     const r = this.rng;
     for (let i = 0; i < 450; i++) {
-      const x = r.range(10, WORLD_W - 10);
-      const y = i < 300 ? this.terrain.floorY(x) - 1.5 : r.range(20, this.terrain.floorY(x) - 5);
+      const x = this.seaX(20);
+      const y = i < 300 ? this.terrain.floorY(x) - 1.5 : r.range(this.seaLevel + 20, this.terrain.floorY(x) - 5);
       this.particles.add(x, y, r.range(0.8, 2.5), 0.12);
     }
+  }
+
+  /** A random x over open water (deep enough for `depth`). */
+  private seaX(depth = 60): number {
+    for (let k = 0; k < 40; k++) {
+      const x = this.rng.range(20, WORLD_W - 20);
+      if (this.terrain.floorY(x) > this.seaLevel + depth) return x;
+    }
+    return this.terrain.landRight ? this.rng.range(20, this.terrain.coastX - 300) : this.rng.range(this.terrain.coastX + 300, WORLD_W - 20);
   }
 
   seedLife(scale: number) {
     const r = this.rng;
     const n = (k: number) => Math.max(1, Math.round(k * scale));
-    for (let i = 0; i < n(140); i++) this.spawn('photo', r.range(20, WORLD_W - 20), r.range(15, 260));
+    // tide-pool pioneers along the beach
+    for (let i = 0; i < n(18); i++) {
+      const x = this.terrain.coastX + (this.terrain.landRight ? 1 : -1) * r.range(-40, 70);
+      this.spawn('pioneer', x, Math.min(this.terrain.floorY(x) - 8, this.seaLevel + r.range(2, 30)));
+    }
+    for (let i = 0; i < n(140); i++) this.spawn('photo', this.seaX(), this.seaLevel + r.range(15, 260));
     for (const v of this.terrain.vents) {
       for (let i = 0; i < n(12); i++) this.spawn('chemo', v.x + r.range(-60, 60), v.y - r.range(15, 90));
     }
-    for (let i = 0; i < n(8); i++) this.spawn('grazer', r.range(20, WORLD_W - 20), r.range(30, 300));
-    for (let i = 0; i < n(3); i++) this.spawn('hunter', r.range(20, WORLD_W - 20), r.range(40, 400));
+    for (let i = 0; i < n(8); i++) this.spawn('grazer', this.seaX(), this.seaLevel + r.range(30, 300));
+    for (let i = 0; i < n(3); i++) this.spawn('hunter', this.seaX(200), this.seaLevel + r.range(40, 400));
     for (let i = 0; i < n(24); i++) {
-      const x = r.range(20, WORLD_W - 20);
+      const x = this.seaX(300);
       this.spawn('scavenger', x, this.terrain.floorY(x) - r.range(10, 120));
     }
-    for (let i = 0; i < n(20); i++) this.spawn('random', r.range(20, WORLD_W - 20), r.range(20, WORLD_H - 150));
-    for (let i = 0; i < n(14); i++) this.spawn('colony', r.range(40, WORLD_W - 40), r.range(20, 220));
-    for (let i = 0; i < n(2); i++) this.spawn('stalker', r.range(40, WORLD_W - 40), r.range(60, 380));
+    for (let i = 0; i < n(20); i++) this.spawn('random', this.seaX(), this.seaLevel + r.range(20, WORLD_H - 150));
+    for (let i = 0; i < n(14); i++) this.spawn('colony', this.seaX(), this.seaLevel + r.range(20, 220));
+    for (let i = 0; i < n(2); i++) this.spawn('stalker', this.seaX(200), this.seaLevel + r.range(60, 380));
   }
 
   /** Create a new organism from an archetype (or a given genome). */
   spawn(arch: Archetype, x: number, y: number, genome?: Genome, speciesId?: number): Organism | null {
     if (this.orgs.length >= MAX_ORGS + 200) return null;
-    if (y < 4 || y > this.terrain.floorY(x) - 4) return null;
+    if (y < -SKY_H + 20 || y > this.terrain.floorY(x) - 3) return null;
     const g = genome ? cloneGenome(genome) : makeGenome(this.rng, arch);
     let sp: Species | undefined = speciesId ? this.species.get(speciesId) : undefined;
     if (!sp) {
@@ -356,8 +492,9 @@ export class World {
     const o = new Organism(this.nextOrgId++, g, sp.id, 0, 0, this.tick, mass, 0, mass * BIO.NUT_RATIO * 0.6);
     o.energy = o.ecap * 0.6;
     o.x = clamp(x, o.radius, WORLD_W - o.radius);
-    o.y = y;
-    o.heading = this.rng.range(-Math.PI, Math.PI);
+    o.y = Math.min(y, this.terrain.floorY(o.x) - o.radius);
+    o.heading = arch === 'plant' ? -Math.PI / 2 : this.rng.range(-Math.PI, Math.PI);
+    o.onLand = o.y < this.seaLevel || this.terrain.floorY(o.x) < this.seaLevel;
     this.addOrganism(o);
     return o;
   }
@@ -407,7 +544,7 @@ export class World {
       const d = Math.sqrt(this.rng.next()) * r;
       const px = x + Math.cos(a) * d;
       const py = y + Math.sin(a) * d;
-      if (py < 1 || py > this.terrain.floorY(px)) continue;
+      if (py < this.seaLevel + 1 || py > this.terrain.floorY(px)) continue;
       this.particles.add(px, py, this.rng.range(1, 2.5), 0.15);
     }
   }
@@ -416,14 +553,14 @@ export class World {
     const F = this.fields;
     const i0 = Math.max(0, Math.floor((x - r) / CELL));
     const i1 = Math.min(NX - 1, Math.floor((x + r) / CELL));
-    const j0 = Math.max(0, Math.floor((y - r) / CELL));
-    const j1 = Math.min(NY - 1, Math.floor((y + r) / CELL));
+    const j0 = Math.max(0, Math.floor((y - r - GRID_TOP) / CELL));
+    const j1 = Math.min(NY - 1, Math.floor((y + r - GRID_TOP) / CELL));
     for (let j = j0; j <= j1; j++) {
       for (let i = i0; i <= i1; i++) {
         const idx = j * NX + i;
         if (F.solid[idx]) continue;
         const dx = (i + 0.5) * CELL - x;
-        const dy = (j + 0.5) * CELL - y;
+        const dy = rowY(j) - y;
         const d = Math.sqrt(dx * dx + dy * dy);
         if (d > r) continue;
         const fall = 1 - d / r;
@@ -449,14 +586,14 @@ export class World {
     const F = this.fields;
     const i0 = Math.max(0, Math.floor((x - r) / CELL));
     const i1 = Math.min(NX - 1, Math.floor((x + r) / CELL));
-    const j0 = Math.max(0, Math.floor((y - r) / CELL));
-    const j1 = Math.min(NY - 1, Math.floor((y + r) / CELL));
+    const j0 = Math.max(0, Math.floor((y - r - GRID_TOP) / CELL));
+    const j1 = Math.min(NY - 1, Math.floor((y + r - GRID_TOP) / CELL));
     for (let j = j0; j <= j1; j++) {
       for (let i = i0; i <= i1; i++) {
         const idx = j * NX + i;
         if (F.solid[idx]) continue;
         const ex = (i + 0.5) * CELL - x;
-        const ey = (j + 0.5) * CELL - y;
+        const ey = rowY(j) - y;
         const d = Math.sqrt(ex * ex + ey * ey);
         if (d > r) continue;
         const fall = 1 - d / r;
@@ -499,8 +636,58 @@ export class World {
     this.terrain.vents = this.terrain.vents.filter((v) => v.id !== id);
   }
 
+  /** Seed rain clouds: moisten and cool the air under the brush. */
+  seedClouds(x: number, y: number, r: number, dt: number) {
+    const A = this.atmosphere;
+    for (let j = 0; j < AIR_NY; j++) {
+      for (let i = 0; i < AIR_NX; i++) {
+        const idx = j * AIR_NX + i;
+        if (!A.air[idx]) continue;
+        const d = Math.hypot((i + 0.5) * AIR_CELL - x, airRowY(j) - y);
+        if (d > r + AIR_CELL * 0.5) continue;
+        const fall = 1 - Math.min(1, d / (r + AIR_CELL * 0.5));
+        A.hum[idx] = Math.max(A.hum[idx], qsat(A.temp[idx]) * 1.02);
+        A.cloud[idx] += 1.4 * fall * dt;
+      }
+    }
+  }
+
+  /** A lightning bolt from the sky at x. */
+  callLightning(x: number) {
+    const A = this.atmosphere;
+    const i = A.column(x);
+    const from = Math.max(-SKY_H + 40, A.surfaceY[i] - 280);
+    const hit = A.strike(x, from, this.rng);
+    this.lastBoltLog = -1e9;
+    this.lightningStrike(hit.x, hit.y);
+  }
+
+  /** Raise (amount < 0) or lower the ground. */
+  terraform(x: number, r: number, amount: number) {
+    this.terrain.terraform(x, r, amount);
+    this.fields.rebuildSolid(this.terrain);
+    this.atmosphere.rebuild(this.terrain, this.seaLevel, true);
+  }
+
+  thunderstorm() {
+    const A = this.atmosphere;
+    const x = this.seaX(40);
+    for (let k = 0; k < 3; k++) A.disturb(x + (k - 1) * 90, 1.6, 6);
+    this.log('A thunderstorm is building over the sea.', 'god');
+  }
+
+  drought() {
+    const A = this.atmosphere;
+    for (let idx = 0; idx < A.hum.length; idx++) {
+      A.hum[idx] *= 0.35;
+      A.cloud[idx] = 0;
+    }
+    for (let i = 0; i < this.soil.moisture.length; i++) if (this.soil.land[i]) this.soil.moisture[i] *= 0.3;
+    this.log('A drought parches the land and clears the skies.', 'god');
+  }
+
   meteor() {
-    const x = this.rng.range(150, WORLD_W - 150);
+    const x = this.seaX(200);
     const y = this.terrain.floorY(x) - 20;
     const n = this.smite(x, y, 260);
     this.paintField('heat', x, y, 220, 2);
@@ -538,7 +725,6 @@ export class World {
   // ---------------------------------------------------------------------------
 
   pick(x: number, y: number, tol: number): Selection {
-    if (y < 0) return { kind: 'sky', x, y };
     // organisms
     let best: Organism | null = null;
     let bd = Infinity;
@@ -567,7 +753,13 @@ export class World {
       }
     }
     if (pi >= 0) return { kind: 'particle', uid: P.uid[pi] };
-    if (y > this.terrain.floorY(x)) return { kind: 'floor', x, y };
+    const fy = this.terrain.floorY(x);
+    if (y > fy) return fy < this.seaLevel ? { kind: 'land', x, y } : { kind: 'floor', x, y };
+    if (y < this.seaLevel || fy < this.seaLevel) {
+      const A = this.atmosphere;
+      const c = A.cellIndex(x, y);
+      return A.cloud[c] > 0.15 ? { kind: 'cloud', x, y } : { kind: 'sky', x, y };
+    }
     return { kind: 'water', x, y };
   }
 

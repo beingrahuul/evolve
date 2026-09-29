@@ -74,8 +74,11 @@ export class Input {
         if (o) app.selectOrganism(o);
         break;
       }
+      case 'lightning':
+        w.callLightning(p.wx);
+        break;
       case 'rock':
-        if (p.wy > 0) {
+        if (p.wy > w.seaLevel - 420) {
           w.placeRock(p.wx, p.wy, app.rockSize, app.rockType);
           w.log('You raised a new rock from the depths.', 'god');
         }
@@ -147,6 +150,9 @@ export class Input {
     if (field) w.paintField(field, p.wx, p.wy, app.brush, dt);
     else if (app.tool === 'food') w.addFood(p.wx, p.wy, app.brush, Math.max(1, Math.round(app.brush * app.brush * 0.0004)));
     else if (app.tool === 'smite') w.smite(p.wx, p.wy, app.brush);
+    else if (app.tool === 'rain') w.seedClouds(p.wx, p.wy, app.brush, dt);
+    else if (app.tool === 'raise') w.terraform(p.wx, app.brush, -70 * dt);
+    else if (app.tool === 'lower') w.terraform(p.wx, app.brush, 70 * dt);
   }
 
   private key(e: KeyboardEvent) {

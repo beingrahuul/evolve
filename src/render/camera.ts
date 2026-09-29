@@ -16,21 +16,21 @@ export class Camera {
     const first = this.viewW === 1;
     this.viewW = w;
     this.viewH = h;
-    this.fitZoom = Math.min(w / (WORLD_W * 1.02), h / ((WORLD_H + SKY_H * 0.45) * 1.02));
+    this.fitZoom = Math.min(w / (WORLD_W * 1.02), h / ((WORLD_H + SKY_H) * 1.02));
     if (first) this.fit();
     this.clamp();
   }
 
-  /** Show the whole world inside the area left free by the UI panels. */
+  /** Frame the world's width inside the area left free by the UI panels, from the sky down. */
   fit() {
     const [l, t, r, b] = this.insets;
     const fw = Math.max(200, this.viewW - l - r);
     const fh = Math.max(200, this.viewH - t - b);
-    const sky = SKY_H * 0.35;
-    this.zoom = Math.max(this.fitZoom * 0.75, Math.min(fw / (WORLD_W * 1.02), fh / ((WORLD_H + sky) * 1.02)));
-    // centre the world in the free area
+    const top = -SKY_H * 0.72;
+    this.zoom = Math.max(this.fitZoom * 0.75, Math.min(fw / (WORLD_W * 1.02), fh / ((WORLD_H - top) * 0.62)));
+    const visH = fh / this.zoom;
     const cxWorld = WORLD_W / 2;
-    const cyWorld = (WORLD_H - sky) / 2;
+    const cyWorld = Math.min(top + visH / 2, (top + WORLD_H) / 2);
     this.x = cxWorld - (l + fw / 2 - this.viewW / 2) / this.zoom;
     this.y = cyWorld - (t + fh / 2 - this.viewH / 2) / this.zoom;
   }
@@ -65,7 +65,7 @@ export class Camera {
     const sx = this.viewW / 3 / this.zoom;
     const sy = this.viewH / 3 / this.zoom;
     this.x = Math.max(-sx * 0.5, Math.min(WORLD_W + sx * 0.5, this.x));
-    this.y = Math.max(-SKY_H * 0.8, Math.min(WORLD_H + sy * 0.5, this.y));
+    this.y = Math.max(-SKY_H, Math.min(WORLD_H + sy * 0.5, this.y));
   }
 
   /** Visible world rectangle. */

@@ -56,7 +56,7 @@ const help = h(
     h(
       'p',
       {},
-      'Given time, lineages can become multicellular: a mutation can add a specialised cell (photocyte, mouth, eye, motor, shell, float or fat cell) to the body plan, and bodies grow cell by cell from a small bud. Open the tree of life (T) to watch species branch and die out.',
+      'The sea has tides, the sky has weather (clouds, rain, storms and lightning) and one shore rises into land. Tide-pool pioneers can colonise it if they evolve a waxy cuticle and roots; land plants then compete to grow tallest for the light. Given time, lineages can also become multicellular: a mutation can add a specialised cell (photocyte, mouth, eye, motor, shell, float or fat cell) to the body plan, and bodies grow cell by cell from a small bud. Open the tree of life (T) to watch species branch and die out.',
     ),
     h(
       'p',

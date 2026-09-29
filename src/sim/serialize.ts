@@ -1,12 +1,12 @@
 // Saving and restoring a whole world as plain JSON (typed arrays are base64-encoded).
-import { Archetype, Genome } from './genome';
+import { Archetype, Genome, NALLOC } from './genome';
 import { Organism } from './organism';
-import { GodParams, NX, NY, defaultParams } from './params';
+import { AIR_NX, AIR_NY, GodParams, NX, NY, defaultParams } from './params';
 import { Species } from './species';
 import { ROCK_TYPES } from './terrain';
 import { World } from './world';
 
-export const SAVE_VERSION = 2;
+export const SAVE_VERSION = 3;
 
 // ---------------------------------------------------------------------------
 // helpers
@@ -65,9 +65,24 @@ export function encodeGenome(g: Genome): GenomeJSON {
   };
 }
 
-export function decodeGenome(j: GenomeJSON): Genome {
+/** Version-2 genomes had 29 sensory inputs; three were added in version 3, shifting node ids. */
+function migrateGenome(j: GenomeJSON, version: number): GenomeJSON {
+  if (version >= 3) return j;
+  const shift = (id: number) => (id >= 29 ? id + 3 : id);
   return {
-    alloc: j.a,
+    ...j,
+    n: j.n.map(([id, order, bias, act]) => [shift(id), order, bias, act]),
+    c: j.c.map(([from, to, w, on]) => [shift(from as number), shift(to as number), w, on]),
+    ni: j.ni + 3,
+  };
+}
+
+export function decodeGenome(j: GenomeJSON, version = SAVE_VERSION): Genome {
+  j = migrateGenome(j, version);
+  const alloc = j.a.slice();
+  while (alloc.length < NALLOC) alloc.push(0.01);
+  return {
+    alloc,
     divMass: j.d,
     tempOpt: j.t,
     tempTol: j.tt,
@@ -133,10 +148,28 @@ export function serializeWorld(w: World): Record<string, unknown> {
       light: b64(F.light.subarray(0, N)),
       atmO2: F.atmO2,
       atmCO2: F.atmCO2,
-      windPhase: F.windPhase,
       eddies: F.eddies,
     },
+    air: {
+      u: b64(w.atmosphere.u.subarray(0, AIR_NX * AIR_NY)),
+      v: b64(w.atmosphere.v.subarray(0, AIR_NX * AIR_NY)),
+      temp: b64(w.atmosphere.temp.subarray(0, AIR_NX * AIR_NY)),
+      hum: b64(w.atmosphere.hum.subarray(0, AIR_NX * AIR_NY)),
+      cloud: b64(w.atmosphere.cloud.subarray(0, AIR_NX * AIR_NY)),
+      rain: b64(w.atmosphere.rain),
+      weatherPhase: w.atmosphere.weatherPhase,
+      stormTimer: w.atmosphere.stormTimer,
+    },
+    soil: {
+      moisture: b64(w.soil.moisture),
+      nutrient: b64(w.soil.nutrient),
+      organic: b64(w.soil.organic),
+      temp: b64(w.soil.temp),
+      snow: b64(w.soil.snow),
+    },
     terrain: {
+      landRight: w.terrain.landRight,
+      coastX: w.terrain.coastX,
       floor: b64(w.terrain.floor),
       nextId: w.terrain.nextId,
       rocks: w.terrain.rocks.map((r) => ({ id: r.id, type: r.type.key, x: r.x, y: r.y, r: r.r, r0: r.r0, seed: r.seed, released: r.released })),
@@ -180,6 +213,7 @@ export function serializeWorld(w: World): Record<string, unknown> {
       s: [o.x, o.y, o.vx, o.vy, o.heading, o.mass, o.energy, o.nutrient, o.health, o.age, o.inflate, o.digesting].map(r5),
       r: [o.eLight, o.eChem, o.eFood, o.ePrey, o.kills, o.children, o.travelled].map(r5),
       nc: o.nCells,
+      hy: r5(o.hydration),
       bv: Array.from(o.brain.values, r5),
     })),
     stats: w.stats.samples,
@@ -191,6 +225,7 @@ export function deserializeWorld(d: any): World {
   if (d.meta.version > SAVE_VERSION) throw new Error('This save was made by a newer version of Primordial.');
   const params: GodParams = { ...defaultParams(), ...d.params };
   const w = new World(d.meta.seed, params, true);
+  const version: number = d.meta.version;
   const N = NX * NY;
 
   w.tick = d.clock.tick;
@@ -207,11 +242,30 @@ export function deserializeWorld(d: any): World {
     solidR: r.r,
   }));
   w.terrain.vents = d.terrain.vents;
+  if (d.terrain.coastX !== undefined) {
+    w.terrain.landRight = d.terrain.landRight;
+    w.terrain.coastX = d.terrain.coastX;
+  } else {
+    // a version-2 world is all ocean
+    w.terrain.landRight = true;
+    w.terrain.coastX = 1e6;
+  }
+  w.updateSun();
 
-  // water
+  // water (version 2 grids started at y = 0: three rows lower)
   const F = w.fields;
-  F.rebuildSolid(w.terrain);
-  const fset = (dst: Float32Array, src: string) => dst.set(unb64(src).subarray(0, N));
+  const sl = w.tideLevel();
+  F.init(w.terrain, sl);
+  const rowShift = version >= 3 ? 0 : 3;
+  const fset = (dst: Float32Array, src: string) => {
+    const a = unb64(src);
+    if (!rowShift) dst.set(a.subarray(0, N));
+    else {
+      const oldN = a.length;
+      dst.set(a.subarray(0, Math.min(oldN, N - rowShift * NX)), rowShift * NX);
+      for (let k = 0; k < rowShift * NX; k++) dst[k] = a[k % NX];
+    }
+  };
   fset(F.u, d.fields.u);
   fset(F.v, d.fields.v);
   fset(F.temp, d.fields.temp);
@@ -222,8 +276,29 @@ export function deserializeWorld(d: any): World {
   fset(F.light, d.fields.light);
   F.atmO2 = d.fields.atmO2;
   F.atmCO2 = d.fields.atmCO2;
-  F.windPhase = d.fields.windPhase;
   F.eddies = d.fields.eddies ?? [];
+
+  // air and soil
+  const A = w.atmosphere;
+  A.init(w.terrain, sl, 16 + params.tempOffset);
+  if (d.air) {
+    const n = AIR_NX * AIR_NY;
+    A.u.set(unb64(d.air.u).subarray(0, n));
+    A.v.set(unb64(d.air.v).subarray(0, n));
+    A.temp.set(unb64(d.air.temp).subarray(0, n));
+    A.hum.set(unb64(d.air.hum).subarray(0, n));
+    A.cloud.set(unb64(d.air.cloud).subarray(0, n));
+    A.rain.set(unb64(d.air.rain).subarray(0, AIR_NX));
+    A.weatherPhase = d.air.weatherPhase;
+    A.stormTimer = d.air.stormTimer;
+  }
+  if (d.soil) {
+    w.soil.moisture.set(unb64(d.soil.moisture));
+    w.soil.nutrient.set(unb64(d.soil.nutrient));
+    w.soil.organic.set(unb64(d.soil.organic));
+    w.soil.temp.set(unb64(d.soil.temp));
+    w.soil.snow.set(unb64(d.soil.snow));
+  } else w.initSoil();
 
   // detritus
   const P = w.particles;
@@ -241,7 +316,7 @@ export function deserializeWorld(d: any): World {
   // species
   w.species.nextId = d.species.nextId;
   for (const s of d.species.all) {
-    const sp: Species = { ...s, founder: decodeGenome(s.founder), count: 0 };
+    const sp: Species = { ...s, founder: decodeGenome(s.founder, version), count: 0 };
     w.species.all.push(sp);
     w.species.byId.set(sp.id, sp);
   }
@@ -249,10 +324,12 @@ export function deserializeWorld(d: any): World {
   // organisms
   for (const j of d.orgs) {
     const [x, y, vx, vy, heading, mass, energy, nutrient, health, age, inflate, digesting] = j.s;
-    const o = new Organism(j.id, decodeGenome(j.g), j.sp, j.gen, j.par, j.born, mass, energy, nutrient);
+    const o = new Organism(j.id, decodeGenome(j.g, version), j.sp, j.gen, j.par, j.born, mass, energy, nutrient);
     Object.assign(o, { x, y, vx, vy, heading, health, age, inflate, digesting });
     [o.eLight, o.eChem, o.eFood, o.ePrey, o.kills, o.children, o.travelled] = j.r;
     if (j.nc) o.setDeveloped(j.nc);
+    if (typeof j.hy === 'number') o.hydration = j.hy;
+    o.onLand = !(o.y > F.seaLevel && w.terrain.floorY(o.x) > F.seaLevel);
     if (Array.isArray(j.bv) && j.bv.length === o.brain.values.length) o.brain.values.set(j.bv);
     w.orgs.push(o);
     w.orgById.set(o.id, o);
@@ -270,7 +347,6 @@ export function deserializeWorld(d: any): World {
   w.archSpecies = new Map(ws.archSpecies as [Archetype, number][]);
   w.events = ws.events ?? [];
   w.stats.samples = d.stats ?? [];
-  w.updateSun();
   w.log(`World restored: day ${w.days + 1}, ${w.orgs.length} organisms.`, 'info');
   return w;
 }

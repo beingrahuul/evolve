@@ -1,4 +1,4 @@
-import { NX, NY, CELL, CHEM, WORLD_H, GodParams } from './params';
+import { NX, NY, CELL, CHEM, GRID_TOP, WORLD_H, GodParams } from './params';
 import { Terrain, richness } from './terrain';
 import { Rng } from './rng';
 
@@ -7,9 +7,13 @@ const N = NX * NY;
 const NA = N + 1;
 const DUMMY = N;
 
+/** World y of the centre of grid row j. */
+export const rowY = (j: number) => GRID_TOP + (j + 0.5) * CELL;
+
 /**
- * The water column: an incompressible fluid (stable-fluids solver) that carries heat and dissolved
+ * The sea: an incompressible fluid (stable-fluids solver) that carries heat and dissolved
  * chemistry (O₂, CO₂, nutrients, sulfide). Everything is stored per grid cell as an amount.
+ * Cells above the (tidal) sea level or inside the ground are masked out.
  */
 export class Fields {
   u = new Float32Array(NA);
@@ -24,16 +28,27 @@ export class Fields {
   shade = new Float32Array(N);
   shadeTicks = 0;
 
+  /** 1 where there is no water: ground, rock, or air above the sea surface. */
   solid = new Uint8Array(N);
+  /** 1 where there is ground or rock. */
+  ground = new Uint8Array(N);
   rockAt = new Int16Array(N);
   floorCell = new Uint8Array(N);
+  /** First water row in each column, or -1 where the column is dry land. */
+  surfRow = new Int16Array(NX);
   fluidCount = 0;
+  seaLevel = 0;
 
   atmO2 = 0.6;
   atmCO2 = 1.0;
   meanTemp = 12;
   airTemp = 18;
-  windPhase = 0;
+  /** Wind stress on the sea surface per column, set from the atmosphere each step. */
+  windX = new Float32Array(NX);
+  /** Air temperature just above the sea surface per column. */
+  airT = new Float32Array(NX).fill(18);
+  /** Fraction of sunlight getting through the clouds per column. */
+  sunCol = new Float32Array(NX).fill(1);
 
   // sample output (avoids allocating)
   su = 0;
@@ -52,7 +67,7 @@ export class Fields {
   private p = new Float32Array(NA);
   private div = new Float32Array(N);
   private curl = new Float32Array(N);
-  // neighbour tables (rebuilt with the solid mask)
+  // neighbour tables (rebuilt with the mask)
   private nbR = new Int32Array(N);
   private nbL = new Int32Array(N);
   private nbD = new Int32Array(N);
@@ -63,10 +78,11 @@ export class Fields {
   private nFluid = 0;
   private tmp = new Float32Array(NA);
 
-  init(t: Terrain) {
+  init(t: Terrain, seaLevel: number) {
+    this.seaLevel = seaLevel;
     this.rebuildSolid(t);
     for (let j = 0; j < NY; j++) {
-      const d = (j + 0.5) / NY;
+      const d = Math.max(0, rowY(j)) / WORLD_H;
       for (let i = 0; i < NX; i++) {
         const idx = j * NX + i;
         this.temp[idx] = 22 - 16 * d;
@@ -78,11 +94,11 @@ export class Fields {
     }
   }
 
+  /** Recompute ground/rock cells, then the water mask. */
   rebuildSolid(t: Terrain) {
-    const { solid, rockAt, floorCell } = this;
-    let fluid = 0;
+    const { ground, rockAt } = this;
     for (let j = 0; j < NY; j++) {
-      const yc = (j + 0.5) * CELL;
+      const yc = rowY(j);
       for (let i = 0; i < NX; i++) {
         const xc = (i + 0.5) * CELL;
         const idx = j * NX + i;
@@ -98,18 +114,69 @@ export class Fields {
             break;
           }
         }
-        solid[idx] = s;
-        if (s) {
-          this.u[idx] = 0;
-          this.v[idx] = 0;
-        } else fluid++;
+        ground[idx] = s;
       }
     }
     for (const r of t.rocks) r.solidR = r.r;
+    this.applyMask(false);
+  }
+
+  /** Move the sea surface (tides). Water drains from or floods into the surface rows. */
+  setSeaLevel(level: number) {
+    if (Math.abs(level - this.seaLevel) < 1e-3) return;
+    this.seaLevel = level;
+    this.applyMask(true);
+  }
+
+  private applyMask(conserve: boolean) {
+    const { solid, ground, temp, o2, co2, nut, sulf, u, v } = this;
+    const sl = this.seaLevel;
+    let changed = false;
+    // bottom-up, so a flooding cell can take water from an already-wet cell below
+    for (let j = NY - 1; j >= 0; j--) {
+      const air = rowY(j) < sl;
+      for (let i = 0; i < NX; i++) {
+        const idx = j * NX + i;
+        const s = ground[idx] || air ? 1 : 0;
+        if (s === solid[idx]) continue;
+        changed = true;
+        const below = j < NY - 1 && !solid[idx + NX] ? idx + NX : -1;
+        if (s) {
+          // drained: its dissolved matter settles into the water below
+          if (conserve && below >= 0 && !ground[idx]) {
+            o2[below] += o2[idx];
+            co2[below] += co2[idx];
+            nut[below] += nut[idx];
+            sulf[below] += sulf[idx];
+          }
+          u[idx] = 0;
+          v[idx] = 0;
+        } else if (conserve && below >= 0) {
+          // flooded: shares the water of the cell below it
+          temp[idx] = temp[below];
+          o2[idx] = o2[below] *= 0.5;
+          co2[idx] = co2[below] *= 0.5;
+          nut[idx] = nut[below] *= 0.5;
+          sulf[idx] = sulf[below] *= 0.5;
+        }
+        solid[idx] = s;
+      }
+    }
+    if (!changed && conserve) return;
+    let fluid = 0;
+    for (let i = 0; i < NX; i++) this.surfRow[i] = -1;
     for (let j = 0; j < NY; j++) {
       for (let i = 0; i < NX; i++) {
         const idx = j * NX + i;
-        floorCell[idx] = !solid[idx] && (j === NY - 1 || solid[idx + NX]) ? 1 : 0;
+        if (solid[idx]) continue;
+        fluid++;
+        if (this.surfRow[i] < 0) this.surfRow[i] = j;
+      }
+    }
+    for (let j = 0; j < NY; j++) {
+      for (let i = 0; i < NX; i++) {
+        const idx = j * NX + i;
+        this.floorCell[idx] = !solid[idx] && (j === NY - 1 || ground[idx + NX]) ? 1 : 0;
       }
     }
     this.fluidCount = fluid;
@@ -141,7 +208,7 @@ export class Fields {
 
   cellIndex(x: number, y: number): number {
     let i = (x / CELL) | 0;
-    let j = (y / CELL) | 0;
+    let j = ((y - GRID_TOP) / CELL) | 0;
     if (i < 0) i = 0;
     else if (i >= NX) i = NX - 1;
     if (j < 0) j = 0;
@@ -149,10 +216,16 @@ export class Fields {
     return j * NX + i;
   }
 
+  /** Grid column of a world x. */
+  column(x: number): number {
+    const i = (x / CELL) | 0;
+    return i < 0 ? 0 : i >= NX ? NX - 1 : i;
+  }
+
   /** Bilinear flow velocity at a world position → (su, sv). */
   sampleVel(x: number, y: number) {
     let gx = x / CELL - 0.5;
-    let gy = y / CELL - 0.5;
+    let gy = (y - GRID_TOP) / CELL - 0.5;
     if (gx < 0) gx = 0;
     else if (gx > NX - 1.001) gx = NX - 1.001;
     if (gy < 0) gy = 0;
@@ -168,9 +241,14 @@ export class Fields {
     this.sv = (v[a] * (1 - s) + v[a + 1] * s) * (1 - t) + (v[a + NX] * (1 - s) + v[a + NX + 1] * s) * t;
   }
 
-  /** Surface wind (signed, + is east) at x. */
-  windAt(x: number, P: GodParams): number {
-    return P.wind * (0.65 * Math.sin(this.windPhase) + 0.35 * Math.sin(x / 520 + this.windPhase * 1.9 + 1.3));
+  /** Add to the surface water of a column (rain, rivers). */
+  addSurface(i: number, dTemp: number, dNut: number) {
+    const j = this.surfRow[i];
+    if (j < 0) return false;
+    const idx = j * NX + i;
+    this.temp[idx] += dTemp;
+    this.nut[idx] += dNut;
+    return true;
   }
 
   step(dtf: number, P: GodParams, t: Terrain, sunNow: number, rng: Rng) {
@@ -192,7 +270,7 @@ export class Fields {
   // -------------------------------------------------------------------------
 
   private applyForces(dtf: number, P: GodParams, t: Terrain, rng: Rng) {
-    const { u, v, temp, solid, curl } = this;
+    const { u, v, temp, solid, curl, surfRow, windX } = this;
     let s = 0;
     let c = 0;
     for (let idx = 0; idx < N; idx++) {
@@ -211,12 +289,17 @@ export class Fields {
     }
 
     // wind drags the surface layer
-    this.windPhase += (dtf * 2 * Math.PI) / 420;
+    let windy = 0;
     for (let i = 0; i < NX; i++) {
-      const w = this.windAt((i + 0.5) * CELL, P) * CHEM.WIND_FORCE * dtf;
-      if (!solid[i]) u[i] += w;
-      if (!solid[NX + i]) u[NX + i] += w * 0.45;
+      const j = surfRow[i];
+      if (j < 0) continue;
+      const w = windX[i] * CHEM.WIND_FORCE * dtf;
+      windy += Math.abs(windX[i]);
+      const idx = j * NX + i;
+      u[idx] += w;
+      if (j + 1 < NY && !solid[idx + NX]) u[idx + NX] += w * 0.45;
     }
+    windy /= NX;
 
     // vent jets
     for (const vent of t.vents) {
@@ -227,32 +310,36 @@ export class Fields {
       }
     }
 
-    // turbulent eddies (mostly in the wind-mixed upper layer)
-    const spawnRate = CHEM.EDDY_RATE * (0.35 + P.wind);
+    // turbulent eddies (mostly in the wind-mixed upper layer; storms stir harder)
+    const spawnRate = CHEM.EDDY_RATE * (0.35 + windy);
     if (this.eddies.length < 8 && rng.next() < spawnRate * dtf) {
       const depth = Math.pow(rng.next(), 1.6);
-      this.eddies.push({
-        x: rng.range(60, NX * CELL - 60),
-        y: 40 + depth * (WORLD_H - 200),
-        r: rng.range(45, 130),
-        s: (rng.next() < 0.5 ? -1 : 1) * CHEM.EDDY_STRENGTH * (0.5 + P.wind) * (1 - depth * 0.6),
-        life: rng.range(5, 14),
-        age: 0,
-      });
+      const x = rng.range(60, NX * CELL - 60);
+      const y = this.seaLevel + 40 + depth * (WORLD_H - 200);
+      if (y < t.floorY(x) - 30) {
+        this.eddies.push({
+          x,
+          y,
+          r: rng.range(45, 130),
+          s: (rng.next() < 0.5 ? -1 : 1) * CHEM.EDDY_STRENGTH * (0.5 + windy) * (1 - depth * 0.6),
+          life: rng.range(5, 14),
+          age: 0,
+        });
+      }
     }
     for (const e of this.eddies) {
       e.age += dtf;
       const env = Math.sin(Math.PI * Math.min(1, e.age / e.life));
       const i0 = Math.max(1, Math.floor((e.x - e.r) / CELL));
       const i1 = Math.min(NX - 2, Math.floor((e.x + e.r) / CELL));
-      const j0 = Math.max(1, Math.floor((e.y - e.r) / CELL));
-      const j1 = Math.min(NY - 2, Math.floor((e.y + e.r) / CELL));
+      const j0 = Math.max(1, Math.floor((e.y - e.r - GRID_TOP) / CELL));
+      const j1 = Math.min(NY - 2, Math.floor((e.y + e.r - GRID_TOP) / CELL));
       for (let j = j0; j <= j1; j++) {
         for (let i = i0; i <= i1; i++) {
           const idx = j * NX + i;
           if (solid[idx]) continue;
           const dx = (i + 0.5) * CELL - e.x;
-          const dy = (j + 0.5) * CELL - e.y;
+          const dy = rowY(j) - e.y;
           const q = Math.sqrt(dx * dx + dy * dy) / e.r;
           if (q >= 1) continue;
           const f = (e.s * env * dtf * Math.exp(-q * q * 3)) / e.r;
@@ -460,7 +547,7 @@ export class Fields {
   }
 
   private sources(dtf: number, P: GodParams, t: Terrain, sunNow: number, rng: Rng) {
-    const { temp, o2, co2, nut, sulf, solid, floorCell, u, v } = this;
+    const { temp, o2, co2, nut, sulf, solid, floorCell, u, v, surfRow, airT } = this;
 
     // surface: gas exchange with the atmosphere, heat exchange with the air, solar heating
     this.airTemp = 13 + 9 * sunNow + P.tempOffset;
@@ -471,26 +558,33 @@ export class Fields {
     let dO = 0;
     let dC = 0;
     for (let i = 0; i < NX; i++) {
-      if (solid[i]) continue;
-      const fo = (eqO - o2[i]) * ge;
-      o2[i] += fo;
+      const j = surfRow[i];
+      if (j < 0) continue;
+      const idx = j * NX + i;
+      const fo = (eqO - o2[idx]) * ge;
+      o2[idx] += fo;
       dO += fo;
-      const fc = (eqC - co2[i]) * ge;
-      co2[i] += fc;
+      const fc = (eqC - co2[idx]) * ge;
+      co2[idx] += fc;
       dC += fc;
-      temp[i] += (this.airTemp - temp[i]) * he;
+      temp[idx] += (airT[i] - temp[idx]) * he;
+      for (let k = 0; k < 4 && j + k < NY; k++) {
+        const q = idx + k * NX;
+        if (solid[q]) break;
+        temp[q] += sunNow * CHEM.SOLAR_HEAT * Math.exp(-k * 0.7) * dtf;
+      }
     }
     this.atmO2 = Math.max(0, this.atmO2 - dO / (CHEM.ATM_CELLS * CHEM.O2_EQ));
     this.atmCO2 = Math.max(0, this.atmCO2 - dC / (CHEM.ATM_CELLS * CHEM.CO2_EQ));
-    for (let j = 0; j < 4; j++) {
-      const h = sunNow * CHEM.SOLAR_HEAT * Math.exp(-j * 0.7) * dtf;
-      for (let i = 0; i < NX; i++) temp[j * NX + i] += h;
-    }
 
     // the deep sea floor is cold
     const deep = CHEM.DEEP_TEMP + P.tempOffset * 0.5;
     const dc = CHEM.DEEP_COOL * dtf;
-    for (let idx = 0; idx < N; idx++) if (floorCell[idx]) temp[idx] += (deep - temp[idx]) * dc;
+    for (let idx = 0; idx < N; idx++) {
+      if (!floorCell[idx]) continue;
+      // only deep water is chilled by the floor; shallows follow the air
+      if (rowY((idx / NX) | 0) > 300) temp[idx] += (deep - temp[idx]) * dc;
+    }
 
     // hydrothermal vents: heat, sulfide, minerals, CO₂
     for (const vent of t.vents) {
@@ -548,20 +642,21 @@ export class Fields {
   }
 
   private computeLight(sunNow: number) {
-    const { light, shade, solid } = this;
+    const { light, shade, solid, ground } = this;
     const inv = 1 / Math.max(1, this.shadeTicks);
+    const sl = this.seaLevel;
     for (let i = 0; i < NX; i++) {
       let cum = 0;
       for (let j = 0; j < NY; j++) {
         const idx = j * NX + i;
         if (solid[idx]) {
           light[idx] = 0;
-          cum += 2;
+          if (ground[idx]) cum += 2;
           shade[idx] = 0;
           continue;
         }
-        const yc = (j + 0.5) * CELL;
-        light[idx] = sunNow * Math.exp(-yc / CHEM.LIGHT_DEPTH - cum);
+        const depth = Math.max(0, rowY(j) - sl);
+        light[idx] = sunNow * this.sunCol[i] * Math.exp(-depth / CHEM.LIGHT_DEPTH - cum);
         cum += shade[idx] * inv * CHEM.SHADE_K;
         shade[idx] = 0;
       }
@@ -587,5 +682,3 @@ export class Fields {
     return { o2: o, co2: c, nut: n, sulf: s, meanTemp: t / Math.max(1, this.fluidCount) };
   }
 }
-
-export const depthOf = (y: number) => y / WORLD_H;

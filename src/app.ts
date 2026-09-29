@@ -16,7 +16,11 @@ export type Tool =
   | 'current'
   | 'rock'
   | 'vent'
-  | 'smite';
+  | 'smite'
+  | 'rain'
+  | 'lightning'
+  | 'raise'
+  | 'lower';
 
 export const SPEEDS = [1, 3, 10, 30, Infinity];
 

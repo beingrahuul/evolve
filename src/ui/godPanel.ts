@@ -3,6 +3,7 @@ import {
   Bubbles,
   ChevronDown,
   CloudLightning,
+  CloudRain,
   Cookie,
   Dices,
   Egg,
@@ -15,10 +16,13 @@ import {
   Flame,
   MousePointer2,
   Mountain,
+  MountainSnow,
+  Pickaxe,
   RotateCcw,
   Skull,
   Snowflake,
   Sprout,
+  Sun,
   ThermometerSun,
   Wind,
   Zap,
@@ -44,7 +48,7 @@ export interface ToolDef {
 
 export const TOOL_DEFS: ToolDef[] = [
   { id: 'inspect', label: 'Inspect', icon: MousePointer2, key: '1', hint: 'Click anything to see its properties. Drag to pan, scroll to zoom.', brush: false, color: [0.6, 1, 1] },
-  { id: 'spawn', label: 'Create life', icon: Sprout, key: '2', hint: 'Click in the water to create an organism.', brush: false, color: [0.5, 1, 0.6] },
+  { id: 'spawn', label: 'Create life', icon: Sprout, key: '2', hint: 'Click in the sea or on land to create an organism.', brush: false, color: [0.5, 1, 0.6] },
   { id: 'food', label: 'Food', icon: Cookie, key: '3', hint: 'Hold to sprinkle dead organic matter (detritus).', brush: true, color: [1, 0.9, 0.6] },
   { id: 'heat', label: 'Heat', icon: Flame, key: '4', hint: 'Hold to heat the water.', brush: true, color: [1, 0.5, 0.3] },
   { id: 'cool', label: 'Cool', icon: Snowflake, key: '5', hint: 'Hold to chill the water.', brush: true, color: [0.5, 0.8, 1] },
@@ -54,6 +58,10 @@ export const TOOL_DEFS: ToolDef[] = [
   { id: 'rock', label: 'Rock', icon: Mountain, key: '9', hint: 'Click to place a boulder.', brush: false, color: [0.8, 0.75, 0.7] },
   { id: 'vent', label: 'Vent', icon: FlameKindling, key: '0', hint: 'Click near the seafloor to open a hydrothermal vent.', brush: false, color: [1, 0.6, 0.2] },
   { id: 'smite', label: 'Smite', icon: Zap, key: 'x', hint: 'Click or hold to strike down organisms.', brush: true, color: [1, 0.35, 0.35] },
+  { id: 'rain', label: 'Rain cloud', icon: CloudRain, key: 'r', hint: 'Hold in the sky to seed rain clouds.', brush: true, color: [0.75, 0.85, 1] },
+  { id: 'lightning', label: 'Lightning', icon: CloudLightning, key: 'l', hint: 'Click to call down lightning. Over the sea it forges organic molecules; on land it fixes nitrogen.', brush: false, color: [0.9, 0.9, 1] },
+  { id: 'raise', label: 'Raise land', icon: MountainSnow, key: 'g', hint: 'Hold to push the ground up: build islands, mountains and shallows.', brush: true, color: [0.85, 0.7, 0.5] },
+  { id: 'lower', label: 'Dig', icon: Pickaxe, key: 'b', hint: 'Hold to lower the ground: carve bays and deepen the sea.', brush: true, color: [0.55, 0.7, 0.9] },
 ];
 
 interface SliderDef {
@@ -78,9 +86,12 @@ const SLIDERS: SliderDef[] = [
   { key: 'vents', label: 'Vent activity', min: 0, max: 3, step: 0.05, format: (v) => `${v.toFixed(2)}×`, hint: 'Heat, sulfide and minerals from hydrothermal vents.' },
   { key: 'erosion', label: 'Erosion', min: 0, max: 5, step: 0.1, format: (v) => `${v.toFixed(1)}×`, hint: 'How fast rocks weather into nutrients.' },
   { key: 'decay', label: 'Decay', min: 0, max: 4, step: 0.05, format: (v) => `${v.toFixed(2)}×`, hint: 'How fast bacteria decompose dead matter.' },
+  { key: 'tides', label: 'Tides', min: 0, max: 1.6, step: 0.05, format: (v) => `${v.toFixed(2)}×`, hint: 'How far the sea rises and falls twice a day.' },
+  { key: 'humidity', label: 'Humidity', min: 0, max: 3, step: 0.05, format: (v) => `${v.toFixed(2)}×`, hint: 'How much water evaporates: a wet or an arid climate.' },
+  { key: 'storms', label: 'Storms', min: 0, max: 3, step: 0.05, format: (v) => `${v.toFixed(2)}×`, hint: 'How violent convection is: thunderstorms and lightning.' },
 ];
 
-export const OVERLAYS = ['None', 'Temp', 'O₂', 'CO₂', 'Nutrients', 'Sulfide', 'Light', 'Flow'];
+export const OVERLAYS = ['None', 'Temp', 'O₂', 'CO₂', 'Nutrients', 'Sulfide', 'Light', 'Flow', 'Humidity'];
 
 export class GodPanel implements AppModule {
   readonly root: HTMLElement;
@@ -123,6 +134,8 @@ export class GodPanel implements AppModule {
         app.world.params.tempOffset = 12;
         app.world.log('A heat wave grips the world. The climate warms by 12 °C.', 'god');
       }),
+      this.act(CloudLightning, 'Thunderstorm', 'Build a storm over the sea', () => app.world.thunderstorm()),
+      this.act(Sun, 'Drought', 'Dry the air and the land', () => app.world.drought()),
       this.act(Skull, 'Extinction', 'Kill 90% of life', () => app.world.massExtinction(0.9)),
       this.act(Egg, 'Seed life', 'Scatter new protocells', () => {
         app.world.seedLife(0.5);

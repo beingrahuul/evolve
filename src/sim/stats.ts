@@ -14,6 +14,9 @@ export interface Sample {
   photo: number;
   chemo: number;
   hetero: number;
+  land?: number;
+  cloud?: number;
+  rain?: number;
 }
 
 export class Stats {
@@ -26,9 +29,14 @@ export class Stats {
     let photo = 0;
     let chemo = 0;
     let hetero = 0;
+    let land = 0;
     for (const o of w.orgs) {
       counts.set(o.species, (counts.get(o.species) ?? 0) + 1);
       biomass += o.mass;
+      if (o.onLand) {
+        land++;
+        continue;
+      }
       const f = o.frac;
       const p = f[A.chloro];
       const c = f[A.chemo];
@@ -51,6 +59,9 @@ export class Stats {
       photo,
       chemo,
       hetero,
+      land,
+      cloud: w.atmosphere.summary().cover,
+      rain: w.atmosphere.summary().rain,
     });
     if (this.samples.length > this.max) this.samples.splice(0, this.samples.length - this.max);
   }

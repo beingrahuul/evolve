@@ -104,7 +104,7 @@ export async function quickSaveMeta(): Promise<SaveMeta | null> {
 
 function serializeMeta(w: World): SaveMeta {
   return {
-    version: 2,
+    version: 3,
     seed: w.seed,
     savedAt: new Date().toISOString(),
     day: w.days + 1,

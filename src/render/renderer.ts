@@ -1,5 +1,21 @@
 import { A, CT } from '../sim/genome';
-import { MAX_ORGS, MAX_PARTICLES, NFLOOR, NX, NY, SKY_H, WORLD_H, WORLD_W } from '../sim/params';
+import {
+  AIR_CELL,
+  AIR_NX,
+  AIR_NY,
+  AIR_TOP,
+  CELL,
+  GRID_TOP,
+  MAX_ORGS,
+  MAX_PARTICLES,
+  NFLOOR,
+  NSOIL,
+  NX,
+  NY,
+  SKY_H,
+  WORLD_H,
+  WORLD_W,
+} from '../sim/params';
 import type { Selection, World } from '../sim/world';
 import { Camera } from './camera';
 import { Target, Uniforms, compileProgram, dataTexture, deleteTarget, getUniforms, makeTarget } from './gl';
@@ -13,7 +29,7 @@ export interface ViewState {
   brush: { x: number; y: number; r: number; visible: boolean; color: [number, number, number] } | null;
 }
 
-const CELL_FLOATS = 20;
+const CELL_FLOATS = 24;
 const ROCK_FLOATS = 8;
 const SPRITE_FLOATS = 8;
 const MAX_SPRITES = MAX_PARTICLES + MAX_ORGS + 64;
@@ -59,6 +75,12 @@ export class Renderer {
   private texF0: WebGLTexture;
   private texF1: WebGLTexture;
   private texFloor: WebGLTexture;
+  private texAir: WebGLTexture;
+  private texSoil: WebGLTexture;
+  private airData = new Float32Array(AIR_NX * AIR_NY * 4);
+  private soilData = new Float32Array(NSOIL * 4);
+  private boltData = new Float32Array(20);
+  private floorVersion = -1;
   private floorData = new Float32Array(NFLOOR);
   private floorWorld: World | null = null;
   private ventData = new Float32Array(32);
@@ -109,6 +131,7 @@ export class Renderer {
       ['a_al1', 4, 32],
       ['a_al2', 4, 48],
       ['a_misc', 4, 64],
+      ['a_ext', 4, 80],
     ]);
     this.rockBuf = gl.createBuffer()!;
     gl.bindBuffer(gl.ARRAY_BUFFER, this.rockBuf);
@@ -128,6 +151,8 @@ export class Renderer {
     this.texF0 = dataTexture(gl, NX, NY, gl.RGBA16F, gl.RGBA, this.f0);
     this.texF1 = dataTexture(gl, NX, NY, gl.RGBA16F, gl.RGBA, this.f1);
     this.texFloor = dataTexture(gl, NFLOOR, 1, gl.R16F, gl.RED, this.floorData);
+    this.texAir = dataTexture(gl, AIR_NX, AIR_NY, gl.RGBA16F, gl.RGBA, this.airData);
+    this.texSoil = dataTexture(gl, NSOIL, 1, gl.RGBA16F, gl.RGBA, this.soilData);
   }
 
   private fullscreenVao(p: WebGLProgram): WebGLVertexArrayObject {
@@ -210,8 +235,34 @@ export class Renderer {
     gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, NX, NY, gl.RGBA, gl.FLOAT, f0);
     gl.bindTexture(gl.TEXTURE_2D, this.texF1);
     gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, NX, NY, gl.RGBA, gl.FLOAT, f1);
-    if (this.floorWorld !== world) {
+    // air: temperature, humidity, cloud water, rain (per column)
+    const air = world.atmosphere;
+    const ad = this.airData;
+    for (let j = 0; j < AIR_NY; j++) {
+      for (let i = 0; i < AIR_NX; i++) {
+        const idx = j * AIR_NX + i;
+        const k = idx * 4;
+        ad[k] = air.temp[idx];
+        ad[k + 1] = air.hum[idx];
+        ad[k + 2] = air.air[idx] ? air.cloud[idx] : 0;
+        ad[k + 3] = air.rain[i];
+      }
+    }
+    gl.bindTexture(gl.TEXTURE_2D, this.texAir);
+    gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, AIR_NX, AIR_NY, gl.RGBA, gl.FLOAT, ad);
+    const soil = world.soil;
+    const sd = this.soilData;
+    for (let i = 0; i < NSOIL; i++) {
+      sd[i * 4] = soil.moisture[i];
+      sd[i * 4 + 1] = soil.organic[i];
+      sd[i * 4 + 2] = soil.snow[i];
+      sd[i * 4 + 3] = soil.temp[i];
+    }
+    gl.bindTexture(gl.TEXTURE_2D, this.texSoil);
+    gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, NSOIL, 1, gl.RGBA, gl.FLOAT, sd);
+    if (this.floorWorld !== world || this.floorVersion !== world.terrain.version) {
       this.floorWorld = world;
+      this.floorVersion = world.terrain.version;
       for (let i = 0; i < NFLOOR; i++) this.floorData[i] = world.terrain.floor[i] / WORLD_H;
       gl.bindTexture(gl.TEXTURE_2D, this.texFloor);
       gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, NFLOOR, 1, gl.RED, gl.FLOAT, this.floorData);
@@ -241,7 +292,20 @@ export class Renderer {
     gl.uniform1f(bg.u.u_elev, world.sunElev);
     gl.uniform1f(bg.u.u_phase, world.dayPhase);
     gl.uniform1f(bg.u.u_zoom, zoomDev);
-    gl.uniform1f(bg.u.u_wind, world.params.wind);
+    const air = world.atmosphere;
+    gl.uniform1f(bg.u.u_wind, air.prevailing(world.params));
+    let storm = 0;
+    for (let i = 0; i < AIR_NX; i++) storm += Math.abs(air.surfaceWind((i + 0.5) * AIR_CELL));
+    gl.uniform1f(bg.u.u_storm, Math.min(2, storm / AIR_NX / 8));
+    gl.uniform1f(bg.u.u_sea, world.seaLevel);
+    gl.uniform2f(bg.u.u_grid, GRID_TOP, NY * CELL);
+    gl.uniform2f(bg.u.u_airGrid, AIR_TOP, AIR_NY * AIR_CELL);
+    const bolt = air.bolt;
+    const nb = bolt ? Math.min(10, bolt.pts.length / 2) : 0;
+    for (let k = 0; k < nb * 2; k++) this.boltData[k] = bolt!.pts[k];
+    gl.uniform2fv(bg.u.u_bolt, this.boltData);
+    gl.uniform1i(bg.u.u_boltN, nb);
+    gl.uniform1f(bg.u.u_boltGlow, bolt ? Math.max(0, 1 - bolt.age / 0.5) * (0.7 + 0.3 * Math.sin(bolt.age * 60)) : 0);
     gl.uniform1i(bg.u.u_overlay, view.overlay);
     const vents = world.terrain.vents;
     const nv = Math.min(8, vents.length);
@@ -262,6 +326,13 @@ export class Renderer {
     gl.activeTexture(gl.TEXTURE2);
     gl.bindTexture(gl.TEXTURE_2D, this.texFloor);
     gl.uniform1i(bg.u.u_floor, 2);
+    gl.activeTexture(gl.TEXTURE3);
+    gl.bindTexture(gl.TEXTURE_2D, this.texAir);
+    gl.uniform1i(bg.u.u_air, 3);
+    gl.activeTexture(gl.TEXTURE4);
+    gl.bindTexture(gl.TEXTURE_2D, this.texSoil);
+    gl.uniform1i(bg.u.u_soil, 4);
+    gl.activeTexture(gl.TEXTURE0);
     gl.bindVertexArray(this.triVaoBg);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
 
@@ -391,10 +462,17 @@ export class Renderer {
           cd[b + 13] = Math.min(1, f[A.sensor] * 2);
           cd[b + 14] = Math.min(1, f[A.vacuole] * 2);
           cd[b + 15] = Math.min(1, f[A.storage] * 2);
+          cd[b + 20] = Math.min(1, f[A.root] * 1.6);
         } else {
           for (let q = 8; q < 16; q++) cd[b + q] = 0;
-          cd[b + 8 + (t - 1)] = t === CT.Motor ? 0.75 : 0.95;
+          cd[b + 20] = 0;
+          if (t === CT.Root) cd[b + 20] = 0.95;
+          else cd[b + 8 + (t - 1)] = t === CT.Motor ? 0.75 : 0.95;
         }
+        cd[b + 21] = o.hydration;
+        cd[b + 22] = o.onLand ? 1 : 0;
+        // cells below the ground line (roots) are drawn as if seen through the soil
+        cd[b + 23] = o.onLand && cd[b + 1] > world.terrain.floorY(cd[b]) + 1 ? 1 : 0;
         cd[b + 16] = (o.seed + i * 0.1373) % 1;
         const isMouth = t === CT.Mouth || (t === CT.Core && o.coreFrac[A.mouth] > 0.03);
         cd[b + 17] = flags + (o.eating && isMouth ? 2 : 0);

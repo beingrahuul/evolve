@@ -1,6 +1,8 @@
 import { Copy, Crosshair, Dna, Heart, Highlighter, Skull, Trash2, X } from 'lucide';
 import { App, AppModule } from '../app';
-import { ALLOC_COLORS, ALLOC_NAMES, NALLOC } from '../sim/genome';
+import { qsat } from '../sim/atmosphere';
+import { A, ALLOC_COLORS, ALLOC_NAMES, CT, NALLOC } from '../sim/genome';
+import type { World } from '../sim/world';
 import { Organism } from '../sim/organism';
 import { BIO, CHEM, WORLD_H } from '../sim/params';
 import { hueColor } from '../sim/species';
@@ -61,7 +63,13 @@ export class Inspector implements AppModule {
         this.buildWater(sel.x, sel.y);
         break;
       case 'sky':
-        this.buildSky(sel.x);
+        this.buildSky(sel.x, sel.y);
+        break;
+      case 'cloud':
+        this.buildCloud(sel.x, sel.y);
+        break;
+      case 'land':
+        this.buildLand(sel.x);
         break;
       case 'floor':
         this.buildFloor(sel.x, sel.y);
@@ -128,10 +136,11 @@ export class Inspector implements AppModule {
     const vit = {
       energy: bar('Energy', '#facc15'),
       health: bar('Health', '#4ade80'),
+      hydration: bar('Hydration', '#38bdf8'),
       growth: bar('Growth', '#60a5fa'),
       age: bar('Age', '#a78bfa'),
     };
-    const stats = kvGrid(['Mass', 'Radius', 'Speed', 'Depth', 'Water', 'Children', 'Kills', 'Travelled', 'Born']);
+    const stats = kvGrid(['Habitat', 'Mass', 'Radius', 'Speed', 'Depth', 'Temperature', 'Children', 'Kills', 'Travelled', 'Born']);
 
     const srcColors = ['#4ade80', '#fb923c', '#fde68a', '#f87171'];
     const srcNames = ['Sunlight', 'Chemosynthesis', 'Detritus', 'Prey'];
@@ -164,7 +173,7 @@ export class Inspector implements AppModule {
       role,
       actions,
       deathNote,
-      section('Vitals', vit.energy.root, vit.health.root, vit.growth.root, vit.age.root, status),
+      section('Vitals', vit.energy.root, vit.health.root, vit.hydration.root, vit.growth.root, vit.age.root, status),
       bodySection,
       section('Body', stats.root),
       section('Where its energy comes from', srcBar, srcLegend),
@@ -193,26 +202,33 @@ export class Inspector implements AppModule {
       const g = o.genome;
       vit.energy.set(o.energy / o.ecap, `${fmt(Math.max(0, o.energy))} / ${fmt(o.ecap)}`);
       vit.health.set(o.health, pct(o.health));
+      vit.hydration.set(o.hydration, o.onLand ? pct(o.hydration) : 'in water');
       vit.growth.set(o.mass / g.divMass, `${pct(o.mass / g.divMass)} to split`);
       const life = g.lifespan * (1 + 0.12 * g.body.length);
       vit.age.set(o.age / life, `${o.age.toFixed(0)} / ${life.toFixed(0)} s`);
       const parts: string[] = [];
-      parts.push(o.thrust > 0.08 && o.frac[3] > 0.02 ? `swimming ${pct(o.thrust)}` : 'drifting');
+      const rooted = o.frac[A.root] > 0.12 || o.genome.body.some((c) => c.type === CT.Root);
+      if (o.onLand) parts.push(rooted ? 'rooted, growing towards the light' : Math.abs(o.vx) > 0.3 ? 'crawling' : 'resting on the ground');
+      else parts.push(o.thrust > 0.08 && o.frac[3] > 0.02 ? `swimming ${pct(o.thrust)}` : 'drifting');
+      if (o.onLand && o.hydration < 0.4) parts.push('drying out!');
       if (Math.abs(o.turn) > 0.25) parts.push(o.turn > 0 ? 'turning right' : 'turning left');
       if (o.digesting > 0) parts.push('digesting a meal');
       else if (o.eating) parts.push('mouth open');
-      if (o.frac[6] > 0.03) parts.push(o.inflate > 0.6 ? 'rising' : o.inflate < 0.35 ? 'sinking' : 'hovering');
+      if (!o.onLand && o.frac[6] > 0.03) parts.push(o.inflate > 0.6 ? 'rising' : o.inflate < 0.35 ? 'sinking' : 'hovering');
       if (o.glow > 0.2) parts.push('glowing');
       if (o.touching) parts.push(`touching ${o.touching}`);
       if (o.pain > 0.2) parts.push('in pain!');
       status.textContent = parts.join(' · ');
 
       const ci = w.fields.cellIndex(o.x, o.y);
+      const sc = w.soil.column(o.x);
+      const elev = w.seaLevel - o.y;
+      stats.set('Habitat', o.onLand ? (w.terrain.floorY(o.x) > w.seaLevel - 12 ? 'Beach (tidal zone)' : 'On land') : 'In the sea');
       stats.set('Mass', fmt(o.mass, 2));
       stats.set('Radius', `${o.radius.toFixed(1)} µm`);
       stats.set('Speed', `${Math.hypot(o.vx, o.vy).toFixed(1)} µm/s`);
-      stats.set('Depth', `${o.y.toFixed(0)} µm (${pct(o.y / WORLD_H)})`);
-      stats.set('Water', `${w.fields.temp[ci].toFixed(1)} °C`);
+      stats.set('Depth', elev > 0 ? `${elev.toFixed(0)} µm above sea level` : `${(-elev).toFixed(0)} µm (${pct(-elev / WORLD_H)})`);
+      stats.set('Temperature', `${(o.onLand ? w.soil.temp[sc] : w.fields.temp[ci]).toFixed(1)} °C`);
       stats.set('Children', String(o.children));
       stats.set('Kills', String(o.kills));
       stats.set('Travelled', `${fmt(o.travelled, 0)} µm`);
@@ -365,30 +381,109 @@ export class Inspector implements AppModule {
     };
   }
 
-  private buildSky(x: number) {
+  /** Wind as speed + direction (air grid units → stylised km/h). */
+  private windText(u: number, v: number) {
+    const s = Math.hypot(u, v);
+    return s < 0.4 ? 'calm' : `${(s * 3).toFixed(0)} km/h ${dirName(u, v)}`;
+  }
+
+  private buildSky(x: number, y: number) {
     const w = this.app.world;
-    this.setHead('Atmosphere', 'The air above the ocean', '#7dd3fc');
-    const kv = kvGrid(['Time', 'Sun', 'Air temp', 'Wind', 'Oxygen', 'CO₂', 'Weather']);
+    this.setHead('Air', `${Math.max(0, w.seaLevel - y).toFixed(0)} µm above sea level`, '#7dd3fc');
+    const kv = kvGrid(['Time', 'Sun', 'Temperature', 'Humidity', 'Wind', 'Rain below', 'Weather']);
+    const atm = kvGrid(['Oxygen', 'CO₂']);
     this.body.append(
-      section('Air', kv.root),
+      section('This parcel of air', kv.root),
+      section('Whole atmosphere', atm.root),
       h(
         'p',
         { class: 'desc' },
-        'The atmosphere trades gases with the ocean surface. Photosynthesis slowly adds oxygen to it and respiration adds CO₂. Wind drags the surface water into currents.',
+        'Air warmed by the ground or the sea rises and cools; when it cools below its dew point the vapour condenses into cloud, releasing heat that drives it higher still. Wind drags the sea surface into currents.',
       ),
     );
     this.updater = () => {
       const F = w.fields;
+      const air = w.atmosphere;
+      const c = air.cellIndex(x, y);
+      const col = air.column(x);
       const hr = w.hour;
-      const wind = F.windAt(x, w.params);
+      const rain = air.rain[col];
       kv.set('Time', `day ${w.days + 1}, ${String(Math.floor(hr)).padStart(2, '0')}:${String(Math.floor((hr % 1) * 60)).padStart(2, '0')}`);
-      kv.set('Sun', w.sunElev > 0 ? `${pct(w.sunNow / Math.max(0.01, w.params.sun))} high · ${pct(w.params.sun)} strength` : 'below the horizon');
-      kv.set('Air temp', `${F.airTemp.toFixed(1)} °C`);
-      kv.set('Wind', Math.abs(wind) < 0.05 ? 'calm' : `${(Math.abs(wind) * 20).toFixed(0)} km/h ${wind > 0 ? 'eastward →' : '← westward'}`);
-      kv.set('Oxygen', `${(F.atmO2 * 100).toFixed(2)} (relative)`);
-      kv.set('CO₂', `${(F.atmCO2 * 100).toFixed(2)} (relative)`);
-      const ws = Math.abs(wind);
-      kv.set('Weather', ws > 1.6 ? 'Stormy' : ws > 0.6 ? 'Windy, clear' : ws > 0.15 ? 'Breezy, clear' : 'Calm, clear');
+      kv.set('Sun', w.sunElev > 0 ? `${pct(w.sunNow / Math.max(0.01, w.params.sun))} high · ${pct(1 - 0.7 * air.shade[col])} gets through` : 'below the horizon');
+      kv.set('Temperature', `${air.temp[c].toFixed(1)} °C`);
+      kv.set('Humidity', `${pct(Math.min(1.2, air.hum[c] / qsat(air.temp[c])))} relative (${air.hum[c].toFixed(2)} g/kg)`);
+      kv.set('Wind', this.windText(air.u[c], air.v[c]));
+      kv.set('Rain below', rain > 0.01 ? `${(rain * 30).toFixed(1)} mm/h` : 'none');
+      kv.set('Weather', weatherWord(w));
+      atm.set('Oxygen', `${(F.atmO2 * 100).toFixed(2)} (relative)`);
+      atm.set('CO₂', `${(F.atmCO2 * 100).toFixed(2)} (relative)`);
+    };
+  }
+
+  private buildCloud(x: number, y: number) {
+    const w = this.app.world;
+    this.setHead('Cloud', `${Math.max(0, w.seaLevel - y).toFixed(0)} µm above sea level`, '#e2e8f0');
+    const kv = kvGrid(['Cloud water', 'Temperature', 'Humidity', 'Updraft', 'Wind', 'Raining', 'Lightning risk']);
+    this.body.append(
+      section('Cloud', kv.root),
+      h(
+        'p',
+        { class: 'desc' },
+        'Droplets condensed from rising, cooling air. When they grow large enough they fall as rain; tall clouds with strong updrafts become thunderstorms. Lightning over the sea can forge organic molecules; over land it fixes nitrogen into the soil.',
+      ),
+    );
+    this.updater = () => {
+      const air = w.atmosphere;
+      const c = air.cellIndex(x, y);
+      const rain = air.rain[air.column(x)];
+      const up = -air.v[c];
+      kv.set('Cloud water', `${air.cloud[c].toFixed(2)} g/kg`);
+      kv.set('Temperature', `${air.temp[c].toFixed(1)} °C`);
+      kv.set('Humidity', pct(Math.min(1.2, air.hum[c] / qsat(air.temp[c]))));
+      kv.set('Updraft', up > 0.3 ? `${(up * 3).toFixed(0)} km/h rising` : up < -0.3 ? `${(-up * 3).toFixed(0)} km/h sinking` : 'still');
+      kv.set('Wind', this.windText(air.u[c], air.v[c]));
+      kv.set('Raining', rain > 0.01 ? `yes, ${(rain * 30).toFixed(1)} mm/h` : 'no');
+      const risk = air.cloud[c] < 1 ? 0 : Math.min(1, (air.cloud[c] - 1) * (0.3 + Math.max(0, up) / 4) * w.params.storms);
+      kv.set('Lightning risk', risk < 0.02 ? 'none' : risk < 0.2 ? 'low' : risk < 0.5 ? 'moderate' : 'high');
+    };
+  }
+
+  private buildLand(x: number) {
+    const w = this.app.world;
+    const s = w.soil;
+    const i = s.column(x);
+    this.setHead('Land', `at x ${x.toFixed(0)} µm`, '#a16207');
+    const kv = kvGrid(['Elevation', 'Ground', 'Soil water', 'Nutrients', 'Humus', 'Temperature', 'Snow', 'Rain', 'Life here', 'Canopy']);
+    const note = h('p', { class: 'desc' });
+    this.body.append(section('Soil', kv.root), note);
+    this.updater = () => {
+      const fy = w.terrain.floorY(x);
+      const elev = w.seaLevel - fy;
+      const air = w.atmosphere;
+      const rain = air.rain[air.column(x)];
+      let n = 0;
+      let plants = 0;
+      for (const o of w.orgs) {
+        if (!o.onLand || Math.abs(o.x - x) > 40) continue;
+        n++;
+        if (o.frac[A.root] > 0.12) plants++;
+      }
+      kv.set('Elevation', `${elev.toFixed(0)} µm above sea level`);
+      kv.set('Ground', elev < 22 ? 'Sandy beach' : elev > 200 ? 'Rocky mountainside' : 'Soil');
+      kv.set('Soil water', pct(Math.min(1, s.moisture[i])));
+      kv.set('Nutrients', s.nutrient[i].toFixed(3));
+      kv.set('Humus', `${s.organic[i].toFixed(2)} C`);
+      kv.set('Temperature', `${s.temp[i].toFixed(1)} °C`);
+      kv.set('Snow', s.snow[i] > 0.01 ? `${(s.snow[i] * 10).toFixed(1)} mm` : 'none');
+      kv.set('Rain', rain > 0.01 ? `${(rain * 30).toFixed(1)} mm/h` : 'dry');
+      kv.set('Life here', n ? `${n} organisms (${plants} rooted)` : 'barren');
+      kv.set('Canopy', s.canopy[i] > 0.5 ? `leaf area ${s.canopy[i].toFixed(1)}` : 'open ground');
+      const hints: string[] = [];
+      if (s.moisture[i] < 0.15) hints.push('Parched: only cells with a waxy cuticle or deep roots survive here.');
+      if (s.moisture[i] > 0.85) hints.push('Waterlogged: excess water runs downhill to the sea, carrying nutrients with it.');
+      if (elev < 22) hints.push('The tide covers and uncovers this beach twice a day, a nursery for life leaving the sea.');
+      if (s.snow[i] > 0.01) hints.push('Snow insulates the ground and melts into it when the weather warms.');
+      note.textContent = hints.join(' ');
     };
   }
 
@@ -452,3 +547,12 @@ export class Inspector implements AppModule {
   }
 }
 
+/** One or two words for the current weather. */
+export function weatherWord(w: World): string {
+  const s = w.atmosphere.summary();
+  if (w.atmosphere.bolt || (s.rain > 0.12 && s.cover > 0.5)) return 'Thunderstorms';
+  if (s.rain > 0.05) return 'Rain showers';
+  if (s.cover > 0.55) return 'Overcast';
+  if (s.cover > 0.2) return 'Partly cloudy';
+  return w.sunElev > 0 ? 'Clear' : 'Clear night';
+}

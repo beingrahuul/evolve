@@ -57,6 +57,12 @@ export class Organism {
   touching = 0;
   pain = 0;
   digesting = 0; // seconds until it can engulf again
+  /** Water content: 1 in the sea; falls on land unless protected or rooted in moist soil. */
+  hydration = 1;
+  /** True while out of the water (on the beach or inland). */
+  onLand = false;
+  /** Highest point of the body (world y) — for light competition among land plants. */
+  topY = 0;
   dead = false;
   cause = '';
 

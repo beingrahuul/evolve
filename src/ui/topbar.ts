@@ -1,4 +1,5 @@
-import { Atom, Moon, Pause, Play, StepForward, Sun } from 'lucide';
+import { Atom, Cloud, CloudLightning, CloudRain, CloudSun, Moon, Pause, Play, StepForward, Sun, Waves } from 'lucide';
+import { weatherWord } from './inspector';
 import { App, AppModule, SPEEDS } from '../app';
 import { TPS } from '../sim/params';
 import { fmt, h, icon } from './dom';
@@ -18,6 +19,10 @@ export class TopBar implements AppModule {
   };
   private isDay = true;
   private lastPaused: boolean | null = null;
+  private weatherIcon = h('span', { class: 'clock-icon weather-icon' });
+  private weatherText = h('span', { class: 'weather-text' });
+  private tideText = h('span', { class: 'weather-text' });
+  private lastWeather = '';
 
   constructor(private app: App) {
     this.playBtn = h('button', { class: 'btn icon-btn', title: 'Pause / play (Space)', onclick: () => this.togglePause() });
@@ -62,6 +67,7 @@ export class TopBar implements AppModule {
       ),
       h('div', { class: 'divider' }),
       h('div', { class: 'clock' }, this.clockIcon, this.clock),
+      h('div', { class: 'weather', title: 'Weather and tide' }, this.weatherIcon, this.weatherText, h('span', { class: 'tide-icon' }, icon(Waves, 14)), this.tideText),
       h('div', { class: 'divider' }),
       h('div', { class: 'controls' }, this.playBtn, stepBtn, speeds),
       h('div', { class: 'divider' }),
@@ -106,6 +112,17 @@ export class TopBar implements AppModule {
       this.clockIcon.replaceChildren(icon(day ? Sun : Moon, 16));
       this.clockIcon.classList.toggle('night', !day);
     }
+    const word = weatherWord(w);
+    if (word !== this.lastWeather || day !== this.isDay) {
+      this.lastWeather = word;
+      const ic =
+        word === 'Thunderstorms' ? CloudLightning : word === 'Rain showers' ? CloudRain : word === 'Overcast' ? Cloud : word === 'Partly cloudy' ? CloudSun : day ? Sun : Moon;
+      this.weatherIcon.replaceChildren(icon(ic, 16));
+      this.weatherText.textContent = word;
+    }
+    const rising = Math.sin(w.dayPhase * Math.PI * 4) < 0;
+    const hi = -w.seaLevel / Math.max(0.01, w.params.tides * 26);
+    this.tideText.textContent = w.params.tides < 0.05 ? 'no tide' : hi > 0.8 ? 'high tide' : hi < -0.8 ? 'low tide' : rising ? 'tide rising' : 'tide falling';
     this.vitals.pop.textContent = fmt(w.orgs.length, 0);
     let sp = 0;
     for (const s of w.species.all) if (s.count > 0) sp++;

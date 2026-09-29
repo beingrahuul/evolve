@@ -5,7 +5,7 @@ import { h, icon } from './dom';
 
 type Mode = 'species' | 'roles' | 'atmosphere';
 
-const ROLE_COLORS = { photo: '#4ade80', chemo: '#fb923c', hetero: '#f87171' };
+const ROLE_COLORS = { photo: '#4ade80', chemo: '#fb923c', hetero: '#f87171', land: '#c08a57' };
 
 /** Bottom dock: population history chart and the list of living species. */
 export class Dock implements AppModule {
@@ -128,6 +128,7 @@ export class Dock implements AppModule {
         ['O₂', '#7dd3fc', (s) => s.atmO2],
         ['CO₂', '#fbbf24', (s) => s.atmCO2],
         ['Water °C', '#f472b6', (s) => s.meanTemp / 30],
+        ['Cloud %', '#cbd5e1', (s) => s.cloud ?? 0],
       ];
       let max = 0;
       for (const s of samples) for (const [, , f] of series) max = Math.max(max, f(s));
@@ -151,9 +152,9 @@ export class Dock implements AppModule {
       let colors: string[];
       let getter: (s: (typeof samples)[number]) => number[];
       if (this.mode === 'roles') {
-        keys = ['Phototrophs', 'Chemotrophs', 'Heterotrophs'];
-        colors = [ROLE_COLORS.photo, ROLE_COLORS.chemo, ROLE_COLORS.hetero];
-        getter = (s) => [s.photo, s.chemo, s.hetero];
+        keys = ['Phototrophs', 'Chemotrophs', 'Heterotrophs', 'On land'];
+        colors = [ROLE_COLORS.photo, ROLE_COLORS.chemo, ROLE_COLORS.hetero, ROLE_COLORS.land];
+        getter = (s) => [s.photo, s.chemo, s.hetero, s.land ?? 0];
       } else {
         const peak = new Map<number, number>();
         for (const s of samples) for (const [id, c] of s.species) peak.set(id, Math.max(peak.get(id) ?? 0, c));

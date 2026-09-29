@@ -241,6 +241,22 @@ kbd {
 .clock-icon.night {
   color: #c7d2fe;
 }
+.weather {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 12px;
+  min-width: 210px;
+}
+.weather-icon {
+  color: #e2e8f0;
+}
+.tide-icon {
+  display: flex;
+  color: #7dd3fc;
+  margin-left: 6px;
+}
 .controls {
   display: flex;
   align-items: center;
@@ -953,7 +969,18 @@ input[type='range']::-moz-range-thumb {
 
 /* ---------------------------------------------------------------- responsive */
 
+@media (max-width: 1500px) {
+  .weather {
+    min-width: 0;
+  }
+  .weather-text:last-child {
+    display: none;
+  }
+}
 @media (max-width: 1280px) {
+  .weather {
+    display: none;
+  }
   :root {
     --left-w: 232px;
     --right-w: 320px;

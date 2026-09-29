@@ -27,6 +27,7 @@ const GENUS: string[][] = [
   ['Ophthal', 'Aistho', 'Ocello', 'Senso', 'Noö'], // sensor
   ['Aero', 'Physo', 'Vesi', 'Pneumo', 'Bullo'], // vacuole
   ['Lipo', 'Sacco', 'Nutri', 'Amylo', 'Pinguo'], // storage
+  ['Rhizo', 'Terra', 'Xero', 'Geo', 'Humi'], // roots & cuticle
 ];
 const SUFFIX = ['monas', 'coccus', 'bacter', 'zoon', 'cystis', 'phyta', 'plasma', 'ella', 'opsis', 'myces', 'nema', 'phora'];
 const EP1 = ['vel', 'mar', 'ist', 'lor', 'cae', 'run', 'tal', 'phi', 'nox', 'sil', 'ver', 'amb', 'ori', 'qua', 'dra', 'sub', 'gel'];

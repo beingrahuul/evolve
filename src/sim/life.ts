@@ -1,6 +1,7 @@
-import { A, IN, OUT, mutate, signatureKin } from './genome';
+import { qsat } from './atmosphere';
+import { A, CT, IN, OUT, mutate, signatureKin } from './genome';
 import { MAXC, Organism } from './organism';
-import { BIO, CHEM, DT, MAX_ORGS, WORLD_H, WORLD_W } from './params';
+import { BIO, CHEM, DT, MAX_ORGS, SKY_H, WORLD_H, WORLD_W } from './params';
 import type { World } from './world';
 
 const TWO_PI = Math.PI * 2;
@@ -14,7 +15,13 @@ const eyeY = new Float32Array(MAXC);
 export function stepLife(w: World) {
   const orgs = w.orgs;
   const n = orgs.length;
-  for (let i = 0; i < n; i++) orgs[i].updateWorldCells();
+  for (let i = 0; i < n; i++) {
+    const o = orgs[i];
+    o.updateWorldCells();
+    let top = o.y - o.radius;
+    if (o.nCells > 1) for (let c = 0; c < o.nCells; c++) top = Math.min(top, o.wy[c] - o.cellR(c));
+    o.topY = top;
+  }
   const births: Organism[] = [];
   for (let i = 0; i < n; i++) {
     const o = orgs[i];
@@ -42,18 +49,53 @@ function mouthContact(o: Organism, q: Organism): number {
   return -1;
 }
 
+/** Exchange gas with the atmosphere (used by life on land). */
+function toAir(w: World, co2: number, o2: number) {
+  const F = w.fields;
+  F.atmCO2 = Math.max(0, F.atmCO2 + co2 / (CHEM.ATM_CELLS * CHEM.CO2_EQ));
+  F.atmO2 = Math.max(0, F.atmO2 + o2 / (CHEM.ATM_CELLS * CHEM.O2_EQ));
+}
+
+/** Respired carbon goes to the water around a sea creature, or to the air on land. */
+function release(w: World, o: Organism, ci: number, co2: number) {
+  if (o.onLand) toAir(w, co2, 0);
+  else w.fields.co2[ci] += co2;
+}
+
 function updateOrganism(w: World, o: Organism, idx: number, births: Organism[]) {
   const F = w.fields;
   const g = o.genome;
   const fr = o.frac;
   const orgs = w.orgs;
+  const soil = w.soil;
+  const air = w.atmosphere;
   const ci = F.cellIndex(o.x, o.y);
-  const T = F.temp[ci];
-  const O2 = F.o2[ci];
-  const CO2 = F.co2[ci];
-  const NU = F.nut[ci];
-  const S = F.sulf[ci];
-  const L = F.light[ci];
+  const col = soil.column(o.x);
+  const ac = air.column(o.x);
+  // in the sea, or out of it (beach at low tide, or inland)?
+  const wet = o.y > F.seaLevel && w.terrain.floorY(o.x) > F.seaLevel;
+  o.onLand = !wet;
+  let T: number;
+  let O2: number;
+  let CO2: number;
+  let NU: number;
+  let S: number;
+  let L: number;
+  if (wet) {
+    T = F.temp[ci];
+    O2 = F.o2[ci];
+    CO2 = F.co2[ci];
+    NU = F.nut[ci];
+    S = F.sulf[ci];
+    L = F.light[ci];
+  } else {
+    T = soil.temp[col] * 0.6 + air.surfaceAirT(o.x) * 0.4;
+    O2 = F.atmO2 * CHEM.O2_EQ;
+    CO2 = F.atmCO2 * CHEM.CO2_EQ;
+    NU = soil.nutrient[col] * Math.min(1, soil.moisture[col] * 1.5);
+    S = 0;
+    L = w.sunNow * (1 - 0.7 * air.shade[ac]) * soil.lightAt(col, o.topY, fr[A.chloro] * o.mass);
+  }
 
   const hx = Math.cos(o.heading);
   const hy = Math.sin(o.heading);
@@ -163,7 +205,20 @@ function updateOrganism(w: World, o: Organism, idx: number, births: Organism[]) 
   let fy = 0;
   let fsum = 0;
   let bite = o.eating && o.nMouths > 0 ? BIO.BITE * fr[A.mouth] * o.mass * DT : 0;
-  {
+  if (!wet && bite > 0) {
+    // land scavengers eat humus (dead organic matter in the soil)
+    const take = Math.min(bite * 0.5, soil.organic[col] * 0.05);
+    if (take > 0) {
+      soil.organic[col] -= take;
+      const gain = take * (0.35 + 0.3 * fr[A.mouth]);
+      o.energy += gain;
+      o.eFood += gain;
+      toAir(w, take - gain, 0);
+      o.nutrient += take * BIO.NUT_RATIO * 0.5;
+    }
+    bite = 0;
+  }
+  if (wet) {
     const pr = range;
     const cx0 = PG.cellX(o.x - pr);
     const cx1 = PG.cellX(o.x + pr);
@@ -271,15 +326,28 @@ function updateOrganism(w: World, o: Organism, idx: number, births: Organism[]) 
   inp[IN.Pain] = o.pain;
   // chemotaxis: compare the water just ahead with just behind (sharper with sense organs)
   {
-    const gd = o.radius + 12;
-    const ia = F.cellIndex(o.x + hx * gd, o.y + hy * gd);
-    const ib = F.cellIndex(o.x - hx * gd, o.y - hy * gd);
     const acuity = Math.min(1, 0.25 + 5 * fr[A.sensor]);
     const clamp1 = (v: number) => (v > 1 ? 1 : v < -1 ? -1 : v);
-    inp[IN.LightGrad] = clamp1(((F.light[ia] - F.light[ib]) / (L + 0.05)) * 2) * acuity;
-    inp[IN.NutGrad] = clamp1(((F.nut[ia] - F.nut[ib]) / (NU + 0.02)) * 2) * acuity;
-    inp[IN.SulfGrad] = Math.tanh((F.sulf[ia] - F.sulf[ib]) * 0.8) * acuity;
+    if (wet) {
+      const gd = o.radius + 12;
+      const ia = F.cellIndex(o.x + hx * gd, o.y + hy * gd);
+      const ib = F.cellIndex(o.x - hx * gd, o.y - hy * gd);
+      inp[IN.LightGrad] = clamp1(((F.light[ia] - F.light[ib]) / (L + 0.05)) * 2) * acuity;
+      inp[IN.NutGrad] = clamp1(((F.nut[ia] - F.nut[ib]) / (NU + 0.02)) * 2) * acuity;
+      inp[IN.SulfGrad] = Math.tanh((F.sulf[ia] - F.sulf[ib]) * 0.8) * acuity;
+    } else {
+      // on land: soil richness ahead vs behind, and which way is uphill (towards the sea is downhill)
+      const d = hx >= 0 ? 2 : -2;
+      const na = soil.nutrient[Math.max(0, Math.min(soil.nutrient.length - 1, col + d))];
+      const nb = soil.nutrient[Math.max(0, Math.min(soil.nutrient.length - 1, col - d))];
+      inp[IN.LightGrad] = 0;
+      inp[IN.NutGrad] = clamp1(((na - nb) / (NU + 0.05)) * 2) * acuity;
+      inp[IN.SulfGrad] = 0;
+    }
   }
+  inp[IN.InWater] = wet ? 1 : 0;
+  inp[IN.Hydration] = o.hydration;
+  inp[IN.Rain] = Math.min(1, air.rain[ac] * 3);
   o.touching = touching;
 
   o.brain.step();
@@ -302,23 +370,49 @@ function updateOrganism(w: World, o: Organism, idx: number, births: Organism[]) 
   const aer = O2 / (O2 + 1.5);
   const burn = upkeep * (2 - aer) * DT; // fermentation (no O₂) is half as efficient
   o.energy -= burn;
-  F.co2[ci] += burn;
-  F.o2[ci] = Math.max(0, F.o2[ci] - burn * aer);
+  if (wet) {
+    F.co2[ci] += burn;
+    F.o2[ci] = Math.max(0, F.o2[ci] - burn * aer);
+  } else toAir(w, burn, -burn * aer);
+
+  // water balance: out of the sea, cells dry out unless protected (cuticle, shell) or rooted in moist soil
+  if (wet) o.hydration = Math.min(1, o.hydration + 0.5 * DT);
+  else {
+    const protect = Math.min(1, fr[A.root] * 2.2 + fr[A.armor] * 0.7 + fr[A.storage] * 0.2);
+    const gc = air.groundCell(ac);
+    const rh = gc >= 0 ? Math.min(1, air.hum[gc] / qsat(air.temp[gc])) : 0.5;
+    const loss = BIO.DRY_RATE * (1 - 0.92 * protect) * (0.5 + Math.max(0, T) / 25) * (1.25 - rh);
+    const moist = Math.min(1, soil.moisture[col]);
+    const gain = (fr[A.root] * 0.6 + 0.02) * moist + air.rain[ac] * 0.6;
+    o.hydration = Math.max(0, Math.min(1, o.hydration + (gain - loss) * DT));
+    soil.moisture[col] = Math.max(0, soil.moisture[col] - gain * DT * 0.004 * o.mass);
+  }
 
   // photosynthesis: CO₂ + light → sugar + O₂
   if (fr[A.chloro] > 0.01) {
-    F.shade[ci] += fr[A.chloro] * o.mass;
+    if (wet) F.shade[ci] += fr[A.chloro] * o.mass;
+    else {
+      soil.cover[col] += fr[A.chloro] * o.mass;
+      if (o.topY < soil.coverTop[col]) soil.coverTop[col] = o.topY;
+    }
     if (L > 0.002) {
-      const rate = BIO.PHOTO * fr[A.chloro] * o.mass * L * (CO2 / (CO2 + 4)) * enzyme;
-      const amt = Math.min(rate * DT, F.co2[ci] * 0.5);
-      o.energy += amt;
-      o.eLight += amt;
-      F.co2[ci] -= amt;
-      F.o2[ci] += amt;
+      const rate = BIO.PHOTO * fr[A.chloro] * o.mass * L * (CO2 / (CO2 + 4)) * enzyme * (wet ? 1 : o.hydration);
+      if (wet) {
+        const amt = Math.min(rate * DT, F.co2[ci] * 0.5);
+        o.energy += amt;
+        o.eLight += amt;
+        F.co2[ci] -= amt;
+        F.o2[ci] += amt;
+      } else {
+        const amt = rate * DT;
+        o.energy += amt;
+        o.eLight += amt;
+        toAir(w, -amt, amt);
+      }
     }
   }
   // chemosynthesis: sulfide + CO₂ → sugar
-  if (fr[A.chemo] > 0.01 && S > 0.01) {
+  if (wet && fr[A.chemo] > 0.01 && S > 0.01) {
     const rate = BIO.CHEMO * fr[A.chemo] * o.mass * (S / (S + 2)) * enzyme;
     const amt = Math.min(rate * DT, F.sulf[ci], F.co2[ci] * 0.5);
     o.energy += amt;
@@ -326,19 +420,32 @@ function updateOrganism(w: World, o: Organism, idx: number, births: Organism[]) 
     F.sulf[ci] -= amt * 0.5;
     F.co2[ci] -= amt;
   }
-  // nutrient uptake through the membrane
+  // nutrient uptake: through the membrane in the sea, through roots from the soil on land
   const ncap = o.mass * BIO.NUT_RATIO * 1.5;
   if (o.nutrient < ncap && NU > 0) {
-    const up = Math.min(BIO.UPTAKE * o.radius * NU * DT, F.nut[ci] * 0.3, ncap - o.nutrient);
-    o.nutrient += up;
-    F.nut[ci] -= up;
+    if (wet) {
+      const up = Math.min(BIO.UPTAKE * o.radius * NU * DT, F.nut[ci] * 0.3, ncap - o.nutrient);
+      o.nutrient += up;
+      F.nut[ci] -= up;
+    } else {
+      // roots reach the neighbouring soil columns too
+      const reachCols = 1 + Math.min(3, Math.floor(o.radius / 8));
+      const each = (BIO.UPTAKE * (0.2 + 4 * fr[A.root]) * o.radius * NU * DT) / (2 * reachCols + 1);
+      for (let d = -reachCols; d <= reachCols && o.nutrient < ncap; d++) {
+        const c = Math.max(0, Math.min(soil.nutrient.length - 1, col + d));
+        const up = Math.min(each, soil.nutrient[c] * 0.3, ncap - o.nutrient);
+        o.nutrient += up;
+        soil.nutrient[c] -= up;
+      }
+    }
   } else if (o.nutrient > ncap) {
-    F.nut[ci] += o.nutrient - ncap;
+    if (wet) F.nut[ci] += o.nutrient - ncap;
+    else soil.nutrient[col] += o.nutrient - ncap;
     o.nutrient = ncap;
   }
   // energy beyond storage capacity is respired away
   if (o.energy > o.ecap) {
-    F.co2[ci] += o.energy - o.ecap;
+    release(w, o, ci, o.energy - o.ecap);
     o.energy = o.ecap;
   }
 
@@ -350,7 +457,7 @@ function updateOrganism(w: World, o: Organism, idx: number, births: Organism[]) 
     if (dm > 0) {
       o.mass += dm;
       o.energy -= dm * (1 + BIO.GROWTH_COST);
-      F.co2[ci] += dm * BIO.GROWTH_COST;
+      release(w, o, ci, dm * BIO.GROWTH_COST);
       o.nutrient -= dm * BIO.NUT_RATIO;
       o.updateSize();
       o.develop();
@@ -374,6 +481,11 @@ function updateOrganism(w: World, o: Organism, idx: number, births: Organism[]) 
     dmg += 0.15;
     dmgCause = 'Starved';
   }
+  if (o.hydration < 0.3) {
+    const d = 0.5 * (0.3 - o.hydration);
+    if (d > dmg) dmgCause = 'Dried out';
+    dmg += d;
+  }
   if (dmg > 0) {
     o.health -= dmg * DT;
     o.pain = Math.min(1, o.pain + dmg * DT * 25);
@@ -381,7 +493,7 @@ function updateOrganism(w: World, o: Organism, idx: number, births: Organism[]) 
     o.health = Math.min(1, o.health + 0.05 * DT);
     const c = 0.006 * o.mass * DT;
     o.energy -= c;
-    F.co2[ci] += c;
+    release(w, o, ci, c);
   }
   o.pain *= 1 - 2 * DT;
   o.age += DT;
@@ -415,6 +527,10 @@ function updateOrganism(w: World, o: Organism, idx: number, births: Organism[]) 
   }
 
   // ---- motion (velocity; position is integrated after collisions) ---------
+  if (!wet) {
+    landMotion(w, o, drive, floatTarget);
+    return;
+  }
   F.sampleVel(o.x, o.y);
   const drag = BIO.DRAG * pw.viscosity * (1 + 0.6 * fr[A.armor]);
   const speed = (BIO.SPEED * drive) / drag;
@@ -432,6 +548,33 @@ function updateOrganism(w: World, o: Organism, idx: number, births: Organism[]) 
   o.heading += (o.turn * (1.2 + 3 * fr[A.flagella]) + jitter / Math.sqrt(o.radius)) * DT;
   if (o.heading > Math.PI) o.heading -= TWO_PI;
   else if (o.heading < -Math.PI) o.heading += TWO_PI;
+}
+
+/** Movement out of the water: fall, rest on the ground, crawl; rooted plants grow towards the light. */
+function landMotion(w: World, o: Organism, drive: number, floatTarget: number) {
+  const fr = o.frac;
+  const rooted = fr[A.root] > 0.12 || o.genome.body.some((c) => c.type === CT.Root);
+  o.inflate += (floatTarget - o.inflate) * Math.min(1, DT * 0.8);
+  if (rooted) {
+    // phototropism: the growing tip turns up
+    let d = -Math.PI / 2 - o.heading;
+    while (d > Math.PI) d -= TWO_PI;
+    while (d < -Math.PI) d += TWO_PI;
+    o.heading += d * Math.min(1, 2 * DT);
+  } else {
+    const rng = w.rng;
+    const jitter = (rng.next() + rng.next() - 1) * 0.6;
+    o.heading += (o.turn * 2 + jitter) * DT;
+    if (o.heading > Math.PI) o.heading -= TWO_PI;
+    else if (o.heading < -Math.PI) o.heading += TWO_PI;
+  }
+  // crawling (feet from flagella/motor cells; roots anchor)
+  const crawl = rooted ? 0 : (BIO.CRAWL * (drive + 0.05 * o.thrust)) / (1 + 6 * fr[A.root]);
+  const tvx = Math.cos(o.heading) >= 0 ? crawl : -crawl;
+  const k = Math.min(1, DT * 6);
+  o.vx += (tvx - o.vx) * k;
+  // gravity (the ground stops the fall in move())
+  o.vy = Math.min(90, o.vy + 150 * w.params.gravity * DT);
 }
 
 function gapeOf(o: Organism, mouth: number): number {
@@ -455,7 +598,7 @@ function tryEngulf(w: World, o: Organism, q: Organism, mouth: number, ci: number
   const gain = carbon * eff;
   o.energy += gain;
   o.ePrey += gain;
-  w.fields.co2[ci] += carbon - gain;
+  release(w, o, ci, carbon - gain);
   o.nutrient += q.nutrient + q.mass * BIO.NUT_RATIO;
   o.kills++;
   o.digesting = 3 + q.mass; // handling time: a meal takes a while to digest
@@ -486,7 +629,7 @@ function tryBite(w: World, o: Organism, q: Organism, mouth: number, ci: number) 
   const gain = carbon * eff;
   o.energy += gain;
   o.ePrey += gain;
-  w.fields.co2[ci] += carbon - gain;
+  release(w, o, ci, carbon - gain);
   o.nutrient += nuChunk + chunk * BIO.NUT_RATIO;
   q.updateSize();
   q.develop();
@@ -503,7 +646,7 @@ function reproduce(w: World, o: Organism, births: Organism[]) {
   const F = w.fields;
   const cost = 0.04 * o.mass;
   o.energy -= cost;
-  F.co2[F.cellIndex(o.x, o.y)] += cost;
+  release(w, o, F.cellIndex(o.x, o.y), cost);
   const g2 = mutate(o.genome, rng, w.params.mutation);
   const sp = w.species.assign(g2, o.species, w.tick, rng);
   const share = o.genome.body.length > 0 ? 0.3 : 0.5;
@@ -518,15 +661,25 @@ function reproduce(w: World, o: Organism, births: Organism[]) {
   const child = new Organism(w.nextOrgId++, g2, sp.id, o.generation + 1, o.id, w.tick, m, e, nu);
   const a = rng.next() * TWO_PI;
   const off = (o.radius + child.radius) * 0.5;
-  child.x = o.x + Math.cos(a) * off;
-  child.y = o.y + Math.sin(a) * off;
-  if (share === 0.5) {
+  if (o.onLand) {
+    // seeds and spores: carried a little way (further on the wind)
+    const wind = w.atmosphere.surfaceWind(o.x);
+    const dx = (rng.chance(0.5) ? -1 : 1) * (o.radius + child.radius + rng.range(5, 45)) + wind * rng.range(0, 4);
+    child.x = Math.max(child.radius, Math.min(WORLD_W - child.radius, o.x + dx));
+    child.y = Math.min(o.y, w.terrain.floorY(child.x) - child.radius - 1);
+    child.heading = -Math.PI / 2;
+    child.hydration = o.hydration;
+  } else {
+    child.x = o.x + Math.cos(a) * off;
+    child.y = o.y + Math.sin(a) * off;
+  }
+  if (share === 0.5 && !o.onLand) {
     o.x -= Math.cos(a) * off;
     o.y -= Math.sin(a) * off;
   }
   child.vx = o.vx;
   child.vy = o.vy;
-  child.heading = a;
+  if (!o.onLand) child.heading = a;
   child.health = o.health;
   child.inflate = o.inflate;
   child.updateWorldCells();
@@ -603,6 +756,8 @@ function collide(w: World, n: number) {
 function move(w: World) {
   const t = w.terrain;
   const rocks = t.rocks;
+  const sl = w.fields.seaLevel;
+  const top = -SKY_H + 10;
   for (const o of w.orgs) {
     if (o.dead) continue;
     const dx = o.vx * DT;
@@ -619,11 +774,13 @@ function move(w: World) {
         o.x = WORLD_W - r;
         o.vx = 0;
       }
-      if (o.y < r) {
-        o.y = r;
+      const fy = t.floorY(o.x) - r;
+      // swimmers stay under the sea surface where the water is deep enough to hold them
+      if (!o.onLand && o.y - r < sl && fy > sl + r) {
+        o.y = sl + r;
         if (o.vy < 0) o.vy = 0;
       }
-      const fy = t.floorY(o.x) - r;
+      if (o.y < top) o.y = top;
       if (o.y > fy) {
         o.y = fy;
         if (o.vy > 0) o.vy = 0;
@@ -642,7 +799,7 @@ function move(w: World) {
       }
       continue;
     }
-    // multicellular: keep every cell inside the water and out of the rocks
+    // multicellular: keep every cell inside the world and out of the rocks; roots may grow into the soil
     o.updateWorldCells();
     let px0 = 0;
     let px1 = 0;
@@ -650,15 +807,18 @@ function move(w: World) {
     let py1 = 0;
     let rx = 0;
     let ry = 0;
+    let submerged = 0;
     for (let i = 0; i < o.nCells; i++) {
       const x = o.wx[i];
       const y = o.wy[i];
       const r = o.cellR(i);
       if (x - r < 0) px0 = Math.max(px0, r - x);
       if (x + r > WORLD_W) px1 = Math.min(px1, WORLD_W - r - x);
-      if (y - r < 0) py0 = Math.max(py0, r - y);
+      if (y - r < top) py0 = Math.max(py0, top + r - y);
+      if (o.ctype[i] === CT.Root) continue;
       const fy = t.floorY(x) - r;
       if (y > fy) py1 = Math.min(py1, fy - y);
+      if (!o.onLand && y - r < sl && fy > sl + r) submerged = Math.max(submerged, sl + r - y);
       for (let k = 0; k < rocks.length; k++) {
         const rk = rocks[k];
         const ex = x - rk.x;
@@ -673,6 +833,7 @@ function move(w: World) {
         }
       }
     }
+    if (submerged > 0) py0 = Math.max(py0, submerged);
     const sx = px0 + px1 + rx * 0.5;
     const sy = py0 + py1 + ry * 0.5;
     o.x += sx;

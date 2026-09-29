@@ -88,45 +88,52 @@ uniform float u_sun;
 uniform float u_elev;
 uniform float u_phase;
 uniform float u_zoom;
-uniform float u_wind;
-uniform sampler2D u_f0; // temp, o2, co2, nut
-uniform sampler2D u_f1; // u, v, sulf, light
+uniform float u_wind;     // prevailing wind (signed)
+uniform float u_storm;    // surface wind strength 0..~2 (waves)
+uniform float u_sea;      // sea level (world y)
+uniform vec2 u_grid;      // water grid top, height
+uniform vec2 u_airGrid;   // air grid top, height
+uniform sampler2D u_f0;   // temp, o2, co2, nut
+uniform sampler2D u_f1;   // u, v, sulf, light
 uniform sampler2D u_floor;
+uniform sampler2D u_air;  // temp, humidity, cloud, rain
+uniform sampler2D u_soil; // moisture, organic, snow, temp
 uniform int u_overlay;
 uniform vec4 u_vents[8];
 uniform int u_nvents;
+uniform vec2 u_bolt[10];
+uniform int u_boltN;
+uniform float u_boltGlow;
 
 float floorY(float x) {
   return texture(u_floor, vec2(clamp(x / u_world.x, 0.0, 1.0), 0.5)).r * u_world.y;
 }
 
 float dayness() { return smoothstep(-0.25, 0.3, u_elev); }
+float qsat(float T) { return 3.8 * exp(0.067 * clamp(T, -40.0, 45.0)); }
 
 vec2 sunPos(float phase) {
   float el = -cos(phase * 6.28318);
-  return vec2(u_world.x * (fract(phase - 0.25) * 2.0 - 0.0) , -el * u_sky * 0.82 - 12.0);
+  return vec2(u_world.x * (fract(phase - 0.25) * 2.0), u_sea - el * u_sky * 0.8 - 20.0);
 }
 
 vec3 sky(vec2 p) {
-  float h = clamp(-p.y / u_sky, 0.0, 1.0);
+  float h = clamp((u_sea - p.y) / u_sky, 0.0, 1.0);
   float day = dayness();
   vec3 dayC = mix(vec3(0.63, 0.80, 0.93), vec3(0.17, 0.42, 0.78), pow(h, 0.7));
   vec3 nightC = mix(vec3(0.045, 0.065, 0.14), vec3(0.008, 0.012, 0.045), h);
   vec3 c = mix(nightC, dayC, day);
   float dusk = exp(-pow(u_elev * 3.2, 2.0));
   c += vec3(0.95, 0.42, 0.16) * dusk * pow(1.0 - h, 2.5) * 0.85;
-  // sun
   vec2 sp = sunPos(u_phase);
   float d = length(p - sp);
   float sunVis = smoothstep(-0.12, 0.02, u_elev);
-  c += vec3(1.0, 0.92, 0.7) * (smoothstep(20.0, 16.0, d) * 2.2 + exp(-d / 70.0) * 0.55) * sunVis * clamp(u_sun, 0.2, 2.0);
-  // moon
+  c += vec3(1.0, 0.92, 0.7) * (smoothstep(22.0, 18.0, d) * 2.2 + exp(-d / 80.0) * 0.55) * sunVis * clamp(u_sun, 0.2, 2.0);
   vec2 mp = sunPos(u_phase + 0.5);
   float md = length(p - mp);
   float moonVis = smoothstep(0.1, -0.2, u_elev);
-  float crescent = smoothstep(12.0, 10.5, md) * (1.0 - smoothstep(12.0, 10.0, length(p - mp - vec2(4.5, -2.0))));
-  c += vec3(0.85, 0.9, 1.0) * (crescent * 1.3 + exp(-md / 50.0) * 0.12) * moonVis;
-  // stars
+  float crescent = smoothstep(13.0, 11.5, md) * (1.0 - smoothstep(13.0, 11.0, length(p - mp - vec2(5.0, -2.0))));
+  c += vec3(0.85, 0.9, 1.0) * (crescent * 1.3 + exp(-md / 55.0) * 0.12) * moonVis;
   vec2 g = floor(p / 6.0);
   float r = hash12(g);
   if (r > 0.984) {
@@ -134,10 +141,43 @@ vec3 sky(vec2 p) {
     float tw = 0.6 + 0.4 * sin(u_time * (1.0 + r * 3.0) + r * 50.0);
     c += vec3(0.9, 0.95, 1.0) * smoothstep(1.2, 0.0, length(p - sp2)) * (1.0 - day) * tw * h;
   }
-  // haze bands drifting with the wind
-  float haze = fbm(vec2(p.x * 0.003 - u_time * 0.02 * u_wind, p.y * 0.02));
-  c = mix(c, c * 1.12 + 0.03, smoothstep(0.55, 0.8, haze) * 0.5 * (1.0 - h));
   return c;
+}
+
+/** Clouds and rain from the air grid, with procedural detail drifting on the wind. */
+vec3 weather(vec2 p, vec3 c, float groundY) {
+  vec2 auv = vec2(p.x / u_world.x, (p.y - u_airGrid.x) / u_airGrid.y);
+  if (auv.y < 0.0 || auv.y > 1.0) return c;
+  vec4 a = texture(u_air, auv);
+  float day = dayness();
+  float dusk = exp(-pow(u_elev * 3.2, 2.0));
+  // rain streaks below the clouds, slanted by the wind
+  float rain = a.w;
+  if (rain > 0.004 && p.y < groundY) {
+    vec2 rp = vec2(p.x + (p.y - u_sea) * 0.35 * clamp(u_wind, -1.5, 1.5), p.y);
+    float lane = floor(rp.x / 2.6);
+    float rnd = hash12(vec2(lane, 7.0));
+    float fy = fract(rp.y * 0.028 + u_time * (2.4 + rnd * 1.2) + rnd * 17.0);
+    float drop = smoothstep(0.0, 0.04, fy) * (1.0 - smoothstep(0.04, 0.3, fy));
+    float thin = 1.0 - smoothstep(0.08, 0.2, abs(fract(rp.x / 2.6) - 0.5));
+    float amount = clamp(rain * 5.0, 0.0, 1.0) * step(0.35, rnd);
+    c = mix(c, c * 0.8 + vec3(0.55, 0.6, 0.7) * (0.35 + 0.5 * day), drop * thin * amount * 0.55);
+    c *= 1.0 - clamp(rain * 1.6, 0.0, 0.3);
+  }
+  float cw = a.z;
+  if (cw < 0.004) return c;
+  vec2 q = p * vec2(0.009, 0.016) + vec2(-u_time * 0.012 * u_wind, u_time * 0.002);
+  float n = fbm(q);
+  float n2 = fbm(q * 2.6 + 5.3);
+  float dens = smoothstep(0.08, 0.55, cw * 1.25 + (n - 0.5) * 0.6 + (n2 - 0.5) * 0.25);
+  if (dens <= 0.001) return c;
+  float above = texture(u_air, auv - vec2(0.0, 0.07)).z;
+  float thick = clamp(cw * 0.9, 0.0, 1.0);
+  vec3 lit = mix(vec3(1.0, 0.99, 0.96), vec3(1.0, 0.7, 0.48), dusk) * (0.3 + 0.7 * day) + vec3(0.05, 0.06, 0.1) * (1.0 - day);
+  vec3 shadow = mix(vec3(0.62, 0.65, 0.72), vec3(0.3, 0.32, 0.38), thick) * (0.25 + 0.75 * day);
+  float selfShadow = clamp(above * 1.3 + thick * 0.55 - (n2 - 0.5) * 0.4, 0.0, 1.0);
+  vec3 cc = mix(lit, shadow, selfShadow);
+  return mix(c, cc, dens * 0.93);
 }
 
 float caustic(vec2 p, float t) {
@@ -151,8 +191,8 @@ float caustic(vec2 p, float t) {
   return pow(c / 3.0, 2.2);
 }
 
-vec3 water(vec2 p, float surf, vec4 f0, vec4 f1) {
-  float depth = clamp(p.y / u_world.y, 0.0, 1.0);
+vec3 water(vec2 p, float surf, float fy, vec4 f0, vec4 f1) {
+  float depth = clamp((p.y - u_sea) / u_world.y, 0.0, 1.0);
   float day = dayness();
   float amb = 0.22 + 0.78 * day;
   vec3 shallow = vec3(0.08, 0.42, 0.52);
@@ -164,25 +204,23 @@ vec3 water(vec2 p, float surf, vec4 f0, vec4 f1) {
   float shade = mix(0.72, 1.12, lf);
   c *= mix(0.55, 1.0, amb) * mix(1.0, shade, day);
   c += vec3(0.0, 0.01, 0.03) * (1.0 - day);
+  // shallows over the beach take on the colour of the sand
+  c = mix(c, vec3(0.45, 0.55, 0.45) * amb, exp(-(fy - p.y) / 9.0) * 0.45);
 
   float below = max(p.y - surf, 0.0);
   if (day > 0.01 && u_sun > 0.01) {
-    // light shafts
     if (below < 1100.0) {
       float slant = (u_phase - 0.5) * 0.9;
       float rx = p.x + p.y * slant;
       float rays = fbm(vec2(rx * 0.011, u_time * 0.045));
-      rays = smoothstep(0.42, 0.85, rays) * exp(-below / 300.0) * u_sun * day;
+      rays = smoothstep(0.42, 0.85, rays) * exp(-below / 300.0) * u_sun * day * lf;
       c += vec3(0.3, 0.55, 0.55) * rays * 0.32;
     }
-    // caustics near the surface
     if (below < 260.0) {
       float ca = caustic(p * 0.035, u_time * 0.9);
-      c += vec3(0.35, 0.7, 0.7) * ca * exp(-below / 55.0) * u_sun * day * 0.3;
+      c += vec3(0.35, 0.7, 0.7) * ca * exp(-below / 55.0) * u_sun * day * 0.3 * lf;
     }
   }
-
-  // flowing streaks (flow-map animation along the current)
   vec2 vel = f1.xy;
   float ph = fract(u_time * 0.22);
   float ph2 = fract(u_time * 0.22 + 0.5);
@@ -191,16 +229,12 @@ vec3 water(vec2 p, float surf, vec4 f0, vec4 f1) {
   float fl = mix(n1, n2, abs(1.0 - 2.0 * ph));
   float spd = length(vel);
   c *= 1.0 + (fl - 0.5) * 0.18 * clamp(spd / 10.0, 0.15, 1.0);
-
-  // chemistry tints
   float temp = f0.x;
   float nut = f0.w;
   float sulf = f1.z;
   c = mix(c, c * vec3(0.85, 1.12, 0.8) + vec3(0.0, 0.015, 0.0), clamp(nut * 1.2, 0.0, 0.45));
   c = mix(c, vec3(0.3, 0.26, 0.1) * amb + 0.03, clamp(sulf * 0.045, 0.0, 0.5));
   c += vec3(1.0, 0.33, 0.07) * clamp((temp - 28.0) / 55.0, 0.0, 1.0) * 0.45;
-
-  // suspended motes
   for (int L = 0; L < 2; L++) {
     float fl2 = float(L);
     float cs = 22.0 + fl2 * 13.0;
@@ -214,25 +248,64 @@ vec3 water(vec2 p, float surf, vec4 f0, vec4 f1) {
       c += vec3(0.55, 0.75, 0.7) * smoothstep(sz, 0.0, md) * (0.12 + 0.35 * lf * day) * (1.0 - depth * 0.6);
     }
   }
-
-  // surface line
   float sd = p.y - surf;
   c += vec3(0.6, 0.85, 0.9) * exp(-sd / 2.2) * (0.25 + 0.6 * day);
+  // foam on stormy seas and in the surf zone
+  float foam = smoothstep(0.55, 0.9, vnoise(vec2(p.x * 0.08 - u_time * 1.5, p.y * 0.3))) * exp(-sd / 3.0);
+  c += vec3(0.8, 0.9, 0.95) * foam * (clamp(u_storm - 0.6, 0.0, 1.0) + exp(-(fy - surf) / 10.0)) * 0.6 * (0.3 + 0.7 * day);
   return c;
+}
+
+/** Rock strata underground, shared by the land and the seabed. */
+vec3 strata(vec2 p, float d, vec3 top) {
+  float n = fbm(p * vec2(0.03, 0.07));
+  vec3 sub = mix(top, vec3(0.3, 0.25, 0.19) * (0.8 + 0.4 * n), smoothstep(3.0, 30.0, d));
+  vec3 bed = vec3(0.22, 0.21, 0.22) * (0.7 + 0.6 * fbm(p * vec2(0.05, 0.12) + 3.0));
+  float band = smoothstep(0.45, 0.55, fract((p.y + n * 60.0) / 70.0)) * 0.05;
+  return mix(sub, bed + band, smoothstep(45.0, 140.0, d + n * 40.0));
 }
 
 vec3 seabed(vec2 p, float fy) {
   float d = p.y - fy;
   float day = dayness();
-  float amb = 0.3 + 0.7 * day;
+  float amb = 0.35 + 0.65 * day;
   float n = fbm(p * 0.06);
   float grain = hash12(floor(p * 1.3));
-  vec3 c = vec3(0.3, 0.26, 0.19) * (0.72 + 0.4 * n + 0.1 * grain);
-  c = mix(c, c * vec3(0.45, 0.5, 0.62), smoothstep(0.0, 70.0, d));
-  c *= 0.4 + 0.35 * amb;
-  c += vec3(0.28, 0.25, 0.17) * exp(-d / 2.5) * 0.55 * amb;
-  // mats of organic sediment near the top
-  c = mix(c, vec3(0.2, 0.22, 0.12) * amb, smoothstep(0.55, 0.75, fbm(p * vec2(0.03, 0.2))) * exp(-d / 8.0) * 0.6);
+  vec3 top = vec3(0.3, 0.26, 0.19) * (0.72 + 0.4 * n + 0.1 * grain);
+  float shore = smoothstep(90.0, 5.0, fy - u_sea);
+  top = mix(top, vec3(0.62, 0.55, 0.4) * (0.85 + 0.3 * n), shore);
+  top = mix(top, vec3(0.2, 0.22, 0.12), smoothstep(0.55, 0.75, fbm(p * vec2(0.03, 0.2))) * exp(-d / 8.0) * 0.6 * (1.0 - shore));
+  float deepDim = mix(1.0, 0.5, smoothstep(0.0, 600.0, fy - u_sea));
+  vec3 c = strata(p, d, top) * amb * deepDim;
+  c += vec3(0.28, 0.25, 0.17) * exp(-d / 2.5) * 0.4 * amb * deepDim;
+  return c;
+}
+
+/** Land: beach sand, topsoil (darker when wet, blacker with humus), bare rock up high, snow when freezing. */
+vec3 land(vec2 p, float fy) {
+  float d = p.y - fy;
+  float elev = u_sea - fy;
+  vec4 s = texture(u_soil, vec2(clamp(p.x / u_world.x, 0.0, 1.0), 0.5));
+  float day = dayness();
+  float amb = 0.35 + 0.65 * day;
+  float n = fbm(p * 0.05);
+  float grain = hash12(floor(p * 1.4));
+  float wet = clamp(s.x, 0.0, 1.0);
+  vec3 soil = mix(vec3(0.5, 0.39, 0.25), vec3(0.3, 0.22, 0.14), wet);
+  soil = mix(soil, vec3(0.16, 0.14, 0.08), clamp(s.y * 0.1, 0.0, 0.6));
+  vec3 sand = mix(vec3(0.8, 0.72, 0.52), vec3(0.58, 0.5, 0.36), wet);
+  vec3 rock = vec3(0.46, 0.45, 0.47) * (0.85 + 0.3 * n);
+  float sandy = 1.0 - smoothstep(10.0, 34.0, elev + n * 10.0);
+  float rocky = smoothstep(170.0, 250.0, elev + n * 60.0);
+  vec3 top = mix(mix(soil, sand, sandy), rock, rocky);
+  // the soil's state only shows in a thin topsoil band; below is plain earth and rock
+  vec3 earth = mix(vec3(0.36, 0.28, 0.19), rock * 0.8, rocky) * (0.85 + 0.3 * n);
+  vec3 c = mix(top, earth, smoothstep(2.0, 11.0, d + n * 3.0));
+  c = strata(p, d, c);
+  c *= (0.85 + 0.25 * n + 0.07 * grain) * amb;
+  float snow = clamp(s.z * 4.0 + smoothstep(1.5, -3.0, s.w) * smoothstep(120.0, 220.0, elev), 0.0, 1.0);
+  c = mix(c, vec3(0.93, 0.96, 1.0) * (0.4 + 0.6 * amb), snow * (1.0 - smoothstep(2.0, 8.0, d + n * 4.0)));
+  c += vec3(0.25, 0.22, 0.16) * exp(-d / 1.6) * 0.35 * amb;
   return c;
 }
 
@@ -243,7 +316,6 @@ vec3 ventLayer(vec2 p, vec3 c) {
     vec2 q = p - v.xy;
     float pw = v.z;
     if (abs(q.x) > 220.0 || q.y < -700.0 || q.y > 40.0) continue;
-    // chimney mound
     float hgt = 36.0;
     float t = clamp(-q.y / hgt, 0.0, 1.0);
     float halfW = mix(22.0, 7.0, t);
@@ -256,16 +328,14 @@ vec3 ventLayer(vec2 p, vec3 c) {
       rock += vec3(1.0, 0.5, 0.15) * exp(-length(q + vec2(0.0, hgt)) / 6.0) * 1.5 * pw;
       c = mix(c, rock, inside);
     }
-    // shimmering plume
     float up = -(q.y + hgt);
-    if (up > 0.0) {
+    if (up > 0.0 && p.y > u_sea) {
       float spread = 5.0 + up * 0.14;
       float wob = sin(up * 0.05 - u_time * 1.5) * up * 0.03;
       float plume = exp(-abs(q.x - wob) / spread) * exp(-up / 180.0);
       float flick = 0.7 + 0.3 * vnoise(vec2(q.x * 0.1, up * 0.05 - u_time * 2.0));
       c += vec3(1.0, 0.45, 0.15) * plume * flick * 0.35 * pw;
       c = mix(c, c * vec3(0.9, 0.85, 0.7), plume * 0.3);
-      // bubbles
       for (int k = 0; k < 7; k++) {
         float fk = float(k);
         float life = fract(u_time * (0.12 + 0.03 * fk) + fk * 0.137);
@@ -280,7 +350,7 @@ vec3 ventLayer(vec2 p, vec3 c) {
   return c;
 }
 
-vec3 overlay(vec3 c, vec4 f0, vec4 f1) {
+vec3 overlayWater(vec3 c, vec4 f0, vec4 f1) {
   if (u_overlay == 0) return c;
   float x = 0.0;
   vec3 m;
@@ -290,33 +360,74 @@ vec3 overlay(vec3 c, vec4 f0, vec4 f1) {
   else if (u_overlay == 4) { x = sqrt(f0.w / 0.6); m = viridis(x); }
   else if (u_overlay == 5) { x = sqrt(f1.z / 12.0); m = turbo(x * 0.9 + 0.05); }
   else if (u_overlay == 6) { x = f1.w; m = mix(vec3(0.02), vec3(1.0, 0.95, 0.6), clamp(x, 0.0, 1.0)); }
-  else { x = length(f1.xy) / 25.0; m = turbo(x * 0.85 + 0.05); }
+  else if (u_overlay == 7) { x = length(f1.xy) / 25.0; m = turbo(x * 0.85 + 0.05); }
+  else return c;
   return mix(c, m * 0.9, 0.62);
+}
+
+vec3 overlayAir(vec3 c, vec2 p) {
+  if (u_overlay != 1 && u_overlay != 8) return c;
+  vec2 auv = vec2(p.x / u_world.x, (p.y - u_airGrid.x) / u_airGrid.y);
+  if (auv.y < 0.0 || auv.y > 1.0) return c;
+  vec4 a = texture(u_air, auv);
+  vec3 m = u_overlay == 1 ? turbo((a.x + 10.0) / 50.0) : viridis(clamp(a.y / qsat(a.x), 0.0, 1.0));
+  return mix(c, m * 0.9, 0.55);
+}
+
+vec3 overlayLand(vec3 c, vec2 p) {
+  if (u_overlay != 1 && u_overlay != 8) return c;
+  vec4 s = texture(u_soil, vec2(clamp(p.x / u_world.x, 0.0, 1.0), 0.5));
+  vec3 m = u_overlay == 1 ? turbo((s.w + 10.0) / 50.0) : viridis(clamp(s.x, 0.0, 1.0));
+  return mix(c, m * 0.9, 0.55);
+}
+
+float segDist(vec2 p, vec2 a, vec2 b) {
+  vec2 pa = p - a;
+  vec2 ba = b - a;
+  float h = clamp(dot(pa, ba) / max(dot(ba, ba), 1e-4), 0.0, 1.0);
+  return length(pa - ba * h);
 }
 
 void main() {
   vec2 p = v_world;
-  float surf = 2.4 * sin(p.x * 0.021 + u_time * 1.1) + 1.5 * sin(p.x * 0.047 - u_time * 1.7) + 0.7 * sin(p.x * 0.11 + u_time * 2.3);
+  float fy = floorY(p.x);
+  float waves = (2.4 * sin(p.x * 0.021 + u_time * 1.1) + 1.5 * sin(p.x * 0.047 - u_time * 1.7) + 0.7 * sin(p.x * 0.11 + u_time * 2.3)) * (0.6 + u_storm * 1.2);
+  float surf = u_sea + waves;
   vec3 c;
   bool outside = p.x < 0.0 || p.x > u_world.x;
-  if (p.y < surf) {
-    c = sky(p);
-  } else {
-    vec2 uv = vec2(p.x / u_world.x, p.y / u_world.y);
+  if (p.y > fy) {
+    // blend land and seabed shading across the shoreline so there is no seam
+    float shoreMix = smoothstep(-2.0, 30.0, fy - u_sea);
+    if (shoreMix <= 0.0) c = overlayLand(land(p, fy), p);
+    else if (shoreMix >= 1.0) c = seabed(p, fy);
+    else c = mix(overlayLand(land(p, fy), p), seabed(p, fy), shoreMix);
+    c = ventLayer(p, c);
+  } else if (p.y > surf) {
+    vec2 uv = vec2(p.x / u_world.x, (p.y - u_grid.x) / u_grid.y);
     vec4 f0 = texture(u_f0, uv);
     vec4 f1 = texture(u_f1, uv);
-    float fy = floorY(p.x);
-    if (p.y > fy) c = seabed(p, fy);
-    else {
-      c = water(p, surf, f0, f1);
-      c = overlay(c, f0, f1);
-    }
+    c = overlayWater(water(p, surf, fy, f0, f1), f0, f1);
     c = ventLayer(p, c);
-    if (outside) {
-      float e = p.x < 0.0 ? -p.x : p.x - u_world.x;
-      vec3 wall = vec3(0.05, 0.05, 0.06) * (0.7 + 0.5 * fbm(p * 0.03));
-      c = mix(c, wall, smoothstep(0.0, 6.0, e));
+  } else {
+    c = sky(p);
+    c = weather(p, c, min(fy, surf));
+    c = overlayAir(c, p);
+    c += vec3(0.5, 0.55, 0.7) * u_boltGlow * 0.45;
+  }
+  if (u_boltN > 1) {
+    float d = 1e9;
+    for (int k = 0; k < 9; k++) {
+      if (k >= u_boltN - 1) break;
+      d = min(d, segDist(p, u_bolt[k], u_bolt[k + 1]));
     }
+    float px = 1.0 / max(u_zoom, 0.1);
+    float core = smoothstep(1.4 * px + 0.6, 0.0, d);
+    c += vec3(0.9, 0.92, 1.0) * (core * 4.0 + exp(-d / 7.0) * 0.9 + exp(-d / 40.0) * 0.25) * u_boltGlow;
+  }
+  if (outside) {
+    float e = p.x < 0.0 ? -p.x : p.x - u_world.x;
+    vec3 wall = vec3(0.05, 0.05, 0.06) * (0.7 + 0.5 * fbm(p * 0.03));
+    c = mix(c, wall, smoothstep(0.0, 6.0, e));
   }
   o = vec4(c, 1.0);
 }
@@ -398,11 +509,13 @@ in vec4 a_look;  // hue, energy, thrust, glow
 in vec4 a_al1;   // chloro, chemo, mouth, flagella
 in vec4 a_al2;   // armor, sensor, vacuole, storage
 in vec4 a_misc;  // seed, flags, health, inflate
+in vec4 a_ext;   // roots/cuticle, hydration, on land, -
 out vec2 v_p;
 flat out vec4 v_look;
 flat out vec4 v_al1;
 flat out vec4 v_al2;
 flat out vec4 v_misc;
+flat out vec4 v_ext;
 flat out float v_aa;
 void main() {
   float r = max(a_pr.z, 2.2 / u_cam.z);
@@ -418,6 +531,7 @@ void main() {
   v_al1 = a_al1;
   v_al2 = a_al2;
   v_misc = a_misc;
+  v_ext = a_ext;
   v_aa = 1.2 / (r * u_cam.z);
   gl_Position = toClip(w);
 }
@@ -429,6 +543,7 @@ flat in vec4 v_look;
 flat in vec4 v_al1;
 flat in vec4 v_al2;
 flat in vec4 v_misc;
+flat in vec4 v_ext;
 flat in float v_aa;
 out vec4 o;
 uniform float u_time;
@@ -458,7 +573,9 @@ void main() {
   float len = length(p);
   float ang = atan(p.y, p.x);
 
-  float rr = 1.0 + 0.04 * sin(ang * 5.0 + t * 1.6) + 0.025 * sin(ang * 3.0 - t * 1.1 + seed * 9.0);
+  float shrivel = clamp(1.0 - v_ext.y * 1.5, 0.0, 1.0);
+  float rr = 1.0 + (0.04 * sin(ang * 5.0 + t * 1.6) + 0.025 * sin(ang * 3.0 - t * 1.1 + seed * 9.0)) * (1.0 - shrivel)
+           - shrivel * 0.08 * (0.5 + 0.5 * sin(ang * 7.0 + seed * 20.0));
   float mo = mouth * (eating ? 1.0 : 0.4);
   rr -= mo * 0.34 * exp(-ang * ang * 9.0 / (0.35 + mo));
   float d = len - rr;
@@ -467,8 +584,14 @@ void main() {
   float ts = chloro + chemo + mouth;
   vec3 troph = (chloro * vec3(0.35, 0.95, 0.4) + chemo * vec3(1.0, 0.62, 0.2) + mouth * vec3(1.0, 0.35, 0.45)) / max(ts, 1e-3);
   vec3 base = mix(pig, troph, clamp(ts * 1.3, 0.0, 0.62));
+  float root = v_ext.x;
+  float hydration = v_ext.y;
+  // root cells are earthy brown
+  base = mix(base, vec3(0.62, 0.45, 0.28), clamp(root * 1.1, 0.0, 0.85));
   float vit = mix(0.45, 1.0, clamp(energy * 1.6, 0.0, 1.0));
   base = mix(vec3(dot(base, vec3(0.3, 0.5, 0.2))), base, 0.35 + 0.65 * health) * vit;
+  // drying out: dull and shrivelled
+  base = mix(vec3(dot(base, vec3(0.3, 0.5, 0.2))) * vec3(0.9, 0.85, 0.7), base, clamp(hydration * 1.6 - 0.2, 0.0, 1.0));
 
   vec4 col = vec4(0.0);
 
@@ -495,6 +618,15 @@ void main() {
     over(col, base * 0.9 + 0.1, a * 0.65);
   }
 
+  // root hairs
+  if (v_ext.x > 0.4) {
+    float k = 14.0;
+    float sa = fract(ang / 6.28318 * k + seed * 3.0);
+    float arc = abs(sa - 0.5) * 6.28318 / k * len;
+    float hl = 0.35 + 0.35 * h11(floor(ang / 6.28318 * k + seed * 3.0) + seed);
+    float a = smoothstep(0.022 + aa, 0.0, arc) * step(rr - 0.02, len) * (1.0 - smoothstep(rr + hl * 0.7, rr + hl, len));
+    over(col, vec3(0.7, 0.55, 0.36) * vit, a * 0.75);
+  }
   float inside = smoothstep(aa, -aa, d);
   if (inside > 0.0) {
     vec3 c = base * 0.26 + vec3(0.02, 0.03, 0.04);
@@ -543,6 +675,8 @@ void main() {
   float mw = 0.05 + armor * 0.22;
   float mem = smoothstep(mw + aa, mw * 0.3, abs(d + mw * 0.5));
   vec3 mc = mix(base * 1.25 + 0.08, vec3(0.55, 0.45, 0.35) * vit, clamp(armor * 1.5, 0.0, 0.8));
+  // a waxy cuticle glints gold
+  mc = mix(mc, vec3(0.95, 0.82, 0.45) * vit, clamp(root * 1.5, 0.0, 0.5) * (1.0 - clamp(root - 0.6, 0.0, 1.0)));
   over(col, mc, mem * 0.95);
   if (mouth > 0.1) {
     float fwd = exp(-ang * ang * 14.0);
@@ -557,6 +691,8 @@ void main() {
     col = mix(col, dotC, small);
   }
   col.rgb *= mix(0.6, 1.0, u_ambient);
+  // buried: seen through the soil
+  if (v_ext.w > 0.5) col *= vec4(vec3(0.75, 0.62, 0.48), 0.7);
 
   if (glow > 0.02) col.rgb += (base * 1.4 + 0.25) * glow * exp(-max(d, 0.0) * 3.5) * 0.9 * (1.0 - inside * 0.4);
   if (selected) {
