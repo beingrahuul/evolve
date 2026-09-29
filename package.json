@@ -1,0 +1,23 @@
+{
+  "name": "evolve",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Primordial - an artificial-life sandbox where cells evolve under physics, chemistry and natural selection",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit",
+    "headless": "tsx scripts/headless.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.3",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.1"
+  },
+  "dependencies": {
+    "lucide": "^1.48.0"
+  }
+}
