@@ -151,7 +151,7 @@ export function serializeWorld(w: World): Record<string, unknown> {
   return {
     meta,
     params: w.params,
-    clock: { tick: w.tick, dayPhase: w.dayPhase, days: w.days, rng: w.rng.state },
+    clock: { tick: w.tick, dayPhase: w.dayPhase, days: w.days, rng: w.rng.state, envRng: w.envRng },
     world: {
       nextOrgId: w.nextOrgId,
       eventSeq: w.eventSeq,
@@ -265,6 +265,7 @@ export function deserializeWorld(d: any): World {
   w.dayPhase = d.clock.dayPhase;
   w.days = d.clock.days;
   w.rng.state = d.clock.rng;
+  if (d.clock.envRng) w.envRng = d.clock.envRng;
 
   // terrain
   w.terrain.floor.set(unb64(d.terrain.floor));

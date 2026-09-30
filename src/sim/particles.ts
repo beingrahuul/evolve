@@ -1,16 +1,17 @@
 import { MAX_PARTICLES } from './params';
+import { f32, i32 } from './shared';
 
 /** Detritus: dead organic matter (marine snow). Structure-of-arrays for speed. */
 export class Particles {
   n = 0;
   readonly cap = MAX_PARTICLES;
-  x = new Float32Array(MAX_PARTICLES);
-  y = new Float32Array(MAX_PARTICLES);
-  c = new Float32Array(MAX_PARTICLES); // carbon (food energy)
-  nu = new Float32Array(MAX_PARTICLES); // nutrients
-  age = new Float32Array(MAX_PARTICLES);
-  rest = new Float32Array(MAX_PARTICLES); // seconds resting on the floor
-  uid = new Int32Array(MAX_PARTICLES);
+  x = f32(MAX_PARTICLES);
+  y = f32(MAX_PARTICLES);
+  c = f32(MAX_PARTICLES); // carbon (food energy)
+  nu = f32(MAX_PARTICLES); // nutrients
+  age = f32(MAX_PARTICLES);
+  rest = f32(MAX_PARTICLES); // seconds resting on the floor
+  uid = i32(MAX_PARTICLES);
   nextUid = 1;
 
   add(x: number, y: number, c: number, nu: number): boolean {

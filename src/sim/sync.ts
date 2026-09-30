@@ -18,6 +18,7 @@ import type { World, WorldEvent } from './world';
 // Messages
 
 export type ToWorker =
+  | { type: 'threads'; pool: number; kernels: number }
   | { type: 'new'; seed: number; width: number; params?: GodParams }
   | { type: 'load'; id: number; blob: Blob }
   | { type: 'save'; id: number }
@@ -74,7 +75,7 @@ export interface Snapshot {
   gen: number;
   /** tick, dayPhase, days, sunNow, sunElev */
   clock: number[];
-  /** ticks per real second, ms per tick (measured in the worker) */
+  /** ticks per real second, ms per tick, threads simulating (measured in the worker) */
   perf: number[];
   /** totalBorn, totalDied, totalMatings, sediment carbon, sediment nutrients, nextOrgId */
   totals: number[];

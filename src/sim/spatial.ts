@@ -1,4 +1,6 @@
-/** Uniform-grid spatial index rebuilt every tick with a counting sort. */
+import { i32 } from './shared';
+
+/** Uniform-grid spatial index rebuilt every tick with a counting sort (readable from other threads). */
 export class SpatialGrid {
   readonly cols: number;
   readonly rows: number;
@@ -16,9 +18,10 @@ export class SpatialGrid {
   ) {
     this.cols = Math.ceil(w / size);
     this.rows = Math.ceil((h - top) / size);
-    this.start = new Int32Array(this.cols * this.rows + 1);
+    this.start = i32(this.cols * this.rows + 1);
     this.fill = new Int32Array(this.cols * this.rows);
-    this.items = new Int32Array(cap);
+    // sized for the most items the world allows, so the shared arrays never have to be replaced
+    this.items = i32(cap);
     this.cellOf = new Int32Array(cap);
   }
 

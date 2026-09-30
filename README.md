@@ -7,7 +7,7 @@ npm install
 npm run dev        # open http://localhost:5173
 ```
 
-URL options: `?seed=123` for a specific world, `?size=standard` or `?size=vast` for another size (the default is wide), `?worker=0` to simulate on the main thread.
+URL options: `?seed=123` for a specific world, `?size=standard` or `?size=vast` for another size (the default is wide), `?worker=0` to simulate on the main thread, `?pool=2&kernels=1` to choose how many helper threads the simulation uses.
 
 ## What's simulated
 
@@ -32,7 +32,8 @@ URL options: `?seed=123` for a specific world, `?size=standard` or `?size=vast` 
 | **Metabolism** | Respiration (fermentation when O₂ is low), photosynthesis, chemosynthesis, nutrient uptake, growth, division, starvation, heat and sulfide damage. |
 | **Brains** | NEAT-style networks that grow neurons and synapses through mutation. There are 39 senses (light, gravity, chemistry and chemical gradients, food, strangers and kin, prey colour, pain, water, hydration, rain, pheromones, a courting relative, being ready to breed, an internal clock) and 7 actions (thrust, turn, eat, float, glow, release pheromone A or B). |
 | **Evolution** | Mutation at every birth, recombination when two parents mate. Species are clustered by genetic distance, and each new species gets a generated Latin name. |
-| **Bigger worlds** | The simulation runs in a Web Worker, so drawing and the panels never slow it down, and it keeps running when the tab is in the background. Worlds come in three widths: Standard (one coast), Wide (a continent and an island; the default) and Vast (an archipelago), with the population cap scaled to match. |
+| **Bigger worlds** | Worlds come in three widths: Standard (one coast), Wide (a continent and an island; the default) and Vast (an archipelago), with the population cap scaled to match. |
+| **Speed** | The simulation runs in a Web Worker, so drawing and the panels never slow it down, and it keeps running when the tab is in the background. It also spreads over several cores (see below). |
 
 ## Controls
 
@@ -48,16 +49,30 @@ URL options: `?seed=123` for a specific world, `?size=standard` or `?size=vast` 
 - **Tree of life** (T, or the button in the species list): every lineage as a timeline bar; click one to find it.
 - **World** panel: new world (seed and size), re-seeding, the simulation thread's speed, and save & load (download a `.primordial` file, open one, or quick-save in the browser). Saves from older versions still open.
 
+## Using several cores
+
+The simulation thread shares its work with helper threads through shared memory:
+
+- **Sensing and brains.** Each tick, every organism's senses (its neighbours, the smell of detritus, the chemistry around it) and its brain are computed in slices by a pool of threads. Brains live in a shared arena so any thread can run them.
+- **The environment.** The sea, air and soil step runs on a thread of its own, one step behind life, and is merged back with whatever life changed meanwhile, so nothing is lost. That thread has its own small pool for the water's heavy loops (pressure, advection, diffusion, light).
+- **The rest of life** (eating, metabolism, growth, breeding, movement, collisions) stays on the simulation thread. It is now the limit.
+
+On an 8-core Apple M2, a Wide world with ~800 organisms runs at 16× real time on five threads, against 9× on one. Shared memory needs a *cross-origin-isolated* page. `npm run dev` and `npm run preview` send the right headers (`vite.config.ts`). A host that does not send them still works, with the simulation on one thread. The World panel shows how many threads are in use.
+
+`scripts/bench.ts` compares one thread with several under Node (see its header for how to run it).
+
 ## Project layout
 
 ```
 src/sim/      simulation (no DOM): world, fields (sea), atmosphere (weather), soil (land), life, genome, brain, species, serialize
-src/sim/      worker.ts runs it in a Web Worker; sync.ts mirrors it to the main thread; commands.ts is every god action as data
+src/sim/      worker.ts runs it in a Web Worker; sync.ts mirrors it to the main thread; commands.ts is every god action as data;
+              threads.ts, pool.ts, helper.ts spread it over several cores; board.ts is sensing; environment.ts the non-living step
 src/host.ts   where the simulation runs (a worker, or the main thread as a fallback)
 src/render/   WebGL2 renderer: procedural ocean, cells, rocks, bloom
 src/ui/       panels: tool sidebar, header, inspector (brain + body plan), notifications, tree of life, charts, save/load, input
 scripts/      headless runners used for tuning: headless.ts [seconds] [seed] [width], weather.ts (land & weather),
-              phase4.ts (sex, learning, signals), evo.ts (long-run drift), loadsave.ts (open a save file)
+              phase4.ts (sex, learning, signals), evo.ts (long-run drift), loadsave.ts (open a save file),
+              bench.ts (one thread vs several)
 ```
 
 Headless timings under `tsx` are about 4× slower than in the browser; bundle first for real numbers:
@@ -69,3 +84,7 @@ Headless timings under `tsx` are about 4× slower than in the browser; bundle fi
 - ~~**Phase 2:** multicellular bodies, eyes and chemotaxis, bite attacks, a phylogenetic tree view, save and load.~~
 - ~~**Phase 3:** weather (clouds, rain, storms), land and tides, colonisation of land.~~
 - ~~**Phase 4:** sexual reproduction, learning within a lifetime, signalling, a Web Worker simulation for bigger worlds.~~
+- **Phase 5, speed:** ~~multi-core simulation (sensing, brains and the environment on helper threads)~~. Next: organisms in shared memory, so the rest of life can be split over cores too.
+- **Phase 6, complex bodies:** lift the 12-cell limit; bodies grown by developmental genes into tissues (wood, leaves and seeds for plants; muscle, gut, nerves and limbs for animals).
+- **Phase 7, ecosystems:** eggs and seeds, parental care, parasites and disease, pollinators and fruit, seasons, rivers and lakes.
+- **Phase 8, the god game:** replaying the tree of life, following a lineage across generations, a creature editor, challenges.

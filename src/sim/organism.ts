@@ -143,6 +143,7 @@ export class Organism {
   /** Replace the genome (god-mode mutation). */
   setGenome(g: Genome) {
     this.genome = g;
+    this.brain.release();
     this.brain = new Brain(g);
     this.derive();
   }

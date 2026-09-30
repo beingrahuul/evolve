@@ -1,6 +1,8 @@
 import { NX, NY, BIO, CELL, CHEM, GRID_TOP, WORLD_H, GodParams } from './params';
 import { Terrain, richness } from './terrain';
 import { Rng } from './rng';
+import { f32, f64, i16, i32, u8 } from './shared';
+import type { Pool } from './pool';
 
 // Grid size, bound when a Fields is created (the world width is chosen per world).
 let N = 0;
@@ -14,6 +16,32 @@ function bindGrid(): number {
   return N;
 }
 
+/** The fluid kernels (see Fields.kernel). */
+const K = {
+  MEAN_TEMP: 1,
+  BUOYANCY: 2,
+  CURL: 3,
+  CONFINE: 4,
+  DAMP: 5,
+  DIFFUSE: 6,
+  WRITE_BACK: 7,
+  DIVERGENCE: 8,
+  SOR_RED: 9,
+  SOR_BLACK: 10,
+  GRADIENT: 11,
+  ADVECT: 12,
+  RESCALE: 13,
+  CELL_SOURCES: 14,
+  LIGHT: 15,
+} as const;
+/** Slice sizes: cells, rows, columns. */
+const CELLS = 2048;
+const ROWS = 6;
+const COLUMNS = 24;
+/** Partial sums kept per slice, and the most slices a job is cut into. */
+const PARTS = 8;
+const MAX_CHUNKS = 256;
+
 /** World y of the centre of grid row j. */
 export const rowY = (j: number) => GRID_TOP + (j + 0.5) * CELL;
 
@@ -25,29 +53,29 @@ export const rowY = (j: number) => GRID_TOP + (j + 0.5) * CELL;
 export class Fields {
   /** Number of grid cells (binds the module's grid size first, so it must stay the first field). */
   readonly size = bindGrid();
-  u = new Float32Array(NA);
-  v = new Float32Array(NA);
-  temp = new Float32Array(NA);
-  o2 = new Float32Array(NA);
-  co2 = new Float32Array(NA);
-  nut = new Float32Array(NA);
-  sulf = new Float32Array(NA);
+  u = f32(NA);
+  v = f32(NA);
+  temp = f32(NA);
+  o2 = f32(NA);
+  co2 = f32(NA);
+  nut = f32(NA);
+  sulf = f32(NA);
   /** Pheromones (chemical signals released by organisms): two channels whose meaning evolves. */
-  sigA = new Float32Array(NA);
-  sigB = new Float32Array(NA);
-  light = new Float32Array(N);
+  sigA = f32(NA);
+  sigB = f32(NA);
+  light = f32(N);
   /** Chlorophyll-mass accumulated by organisms since the last light update. */
-  shade = new Float32Array(N);
+  shade = f32(N);
   shadeTicks = 0;
 
   /** 1 where there is no water: ground, rock, or air above the sea surface. */
-  solid = new Uint8Array(N);
+  solid = u8(N);
   /** 1 where there is ground or rock. */
-  ground = new Uint8Array(N);
-  rockAt = new Int16Array(N);
-  floorCell = new Uint8Array(N);
+  ground = u8(N);
+  rockAt = i16(N);
+  floorCell = u8(N);
   /** First water row in each column, or -1 where the column is dry land. */
-  surfRow = new Int16Array(NX);
+  surfRow = i16(NX);
   fluidCount = 0;
   seaLevel = 0;
 
@@ -56,11 +84,11 @@ export class Fields {
   meanTemp = 12;
   airTemp = 18;
   /** Wind stress on the sea surface per column, set from the atmosphere each step. */
-  windX = new Float32Array(NX);
+  windX = f32(NX);
   /** Air temperature just above the sea surface per column. */
-  airT = new Float32Array(NX).fill(18);
+  airT = f32(NX).fill(18);
   /** Fraction of sunlight getting through the clouds per column. */
-  sunCol = new Float32Array(NX).fill(1);
+  sunCol = f32(NX).fill(1);
 
   // sample output (avoids allocating)
   su = 0;
@@ -69,28 +97,37 @@ export class Fields {
   /** Turbulent eddies: unresolved turbulence stirred up by wind and convection. */
   eddies: { x: number; y: number; r: number; s: number; life: number; age: number }[] = [];
 
-  private bu = new Float32Array(NA);
-  private bv = new Float32Array(NA);
-  private bt = new Float32Array(NA);
-  private bo = new Float32Array(NA);
-  private bc = new Float32Array(NA);
-  private bn = new Float32Array(NA);
-  private bs = new Float32Array(NA);
-  private bA = new Float32Array(NA);
-  private bB = new Float32Array(NA);
-  private p = new Float32Array(NA);
-  private div = new Float32Array(N);
-  private curl = new Float32Array(N);
+  private bu = f32(NA);
+  private bv = f32(NA);
+  private bt = f32(NA);
+  private bo = f32(NA);
+  private bc = f32(NA);
+  private bn = f32(NA);
+  private bs = f32(NA);
+  private bA = f32(NA);
+  private bB = f32(NA);
+  private p = f32(NA);
+  private div = f32(N);
+  private curl = f32(N);
   // neighbour tables (rebuilt with the mask)
-  private nbR = new Int32Array(N);
-  private nbL = new Int32Array(N);
-  private nbD = new Int32Array(N);
-  private nbU = new Int32Array(N);
-  private nbInv = new Float32Array(N);
-  private nbCnt = new Float32Array(N);
-  private fluidList = new Int32Array(N);
+  private nbR = i32(N);
+  private nbL = i32(N);
+  private nbD = i32(N);
+  private nbU = i32(N);
+  private nbInv = f32(N);
+  private nbCnt = f32(N);
+  private fluidList = i32(N);
   private nFluid = 0;
-  private tmp = new Float32Array(NA);
+  /** Fluid cells split by chequerboard colour, for the red-black pressure solve. */
+  private fluidRed = i32(N);
+  private fluidBlack = i32(N);
+  private nRed = 0;
+  private nBlack = 0;
+  /** Scalars for the kernels, and their per-slice partial sums (shared with pool threads). */
+  readonly args = f64(8);
+  readonly partials = f64(MAX_CHUNKS * PARTS);
+  /** Threads to share the heavy loops with (set on the environment thread), or none. */
+  pool: Pool | null = null;
 
   init(t: Terrain, seaLevel: number) {
     this.seaLevel = seaLevel;
@@ -204,6 +241,8 @@ export class Fields {
   private buildNeighbours() {
     const { solid, nbR, nbL, nbD, nbU, nbInv, nbCnt, fluidList } = this;
     let k = 0;
+    this.nRed = 0;
+    this.nBlack = 0;
     for (let j = 0; j < NY; j++) {
       for (let i = 0; i < NX; i++) {
         const idx = j * NX + i;
@@ -218,7 +257,11 @@ export class Fields {
         const cnt = (r !== DUMMY ? 1 : 0) + (l !== DUMMY ? 1 : 0) + (d !== DUMMY ? 1 : 0) + (u !== DUMMY ? 1 : 0);
         nbInv[idx] = cnt ? 1 / cnt : 0;
         nbCnt[idx] = cnt;
-        if (!solid[idx]) fluidList[k++] = idx;
+        if (!solid[idx]) {
+          fluidList[k++] = idx;
+          if ((i + j) % 2 === 0) this.fluidRed[this.nRed++] = idx;
+          else this.fluidBlack[this.nBlack++] = idx;
+        }
       }
     }
     this.nFluid = k;
@@ -272,41 +315,280 @@ export class Fields {
   step(dtf: number, P: GodParams, t: Terrain, sunNow: number, rng: Rng) {
     this.applyForces(dtf, P, t, rng);
     // a little viscosity damps the grid-scale (checkerboard) modes of the collocated solver
-    this.diffuse(this.u, CHEM.VISCOSITY);
-    this.diffuse(this.v, CHEM.VISCOSITY);
+    this.diffuse(0);
     this.project(8);
     this.advect(dtf);
-    this.diffuse(this.temp, CHEM.DIFF_T);
-    this.diffuse(this.o2, CHEM.DIFF_GAS);
-    this.diffuse(this.co2, CHEM.DIFF_GAS);
-    this.diffuse(this.nut, CHEM.DIFF_NUT);
-    this.diffuse(this.sulf, CHEM.DIFF_SULF);
-    this.diffuse(this.sigA, BIO.DIFF_SIG);
-    this.diffuse(this.sigB, BIO.DIFF_SIG);
+    this.diffuse(1);
     this.sources(dtf, P, t, sunNow, rng);
     this.computeLight(sunNow);
   }
 
   // -------------------------------------------------------------------------
+  // The heavy loops are kernels over slices (of rows, columns or cells), so a pool of threads can
+  // share them (pool.ts). Scalars a kernel needs travel in `args`; per-slice sums in `partials`.
+
+  private run(job: number, count: number, chunk: number): number {
+    if (this.pool) {
+      const n = this.pool.run(job, count, chunk);
+      if (n) return n;
+      // a pool thread died mid-job: carry on alone
+      this.pool = null;
+    }
+    this.kernel(job, 0, count, 0);
+    return 1;
+  }
+
+  /** Sum partial result k over the slices of the last job. */
+  private total(k: number, chunks: number): number {
+    let s = 0;
+    for (let c = 0; c < chunks; c++) s += this.partials[c * PARTS + k];
+    return s;
+  }
+
+  /** The fields diffused together, with their scratch arrays and rates: 0 = velocity, 1 = everything carried. */
+  private diffusionSet(set: number): [Float32Array, Float32Array, number][] {
+    return set === 0
+      ? [
+          [this.u, this.bu, CHEM.VISCOSITY],
+          [this.v, this.bv, CHEM.VISCOSITY],
+        ]
+      : [
+          [this.temp, this.bt, CHEM.DIFF_T],
+          [this.o2, this.bo, CHEM.DIFF_GAS],
+          [this.co2, this.bc, CHEM.DIFF_GAS],
+          [this.nut, this.bn, CHEM.DIFF_NUT],
+          [this.sulf, this.bs, CHEM.DIFF_SULF],
+          [this.sigA, this.bA, BIO.DIFF_SIG],
+          [this.sigB, this.bB, BIO.DIFF_SIG],
+        ];
+  }
+
+  kernel(job: number, from: number, to: number, chunk: number) {
+    const a = this.args;
+    switch (job) {
+      case K.MEAN_TEMP: {
+        const { temp, solid } = this;
+        let s = 0;
+        let c = 0;
+        for (let idx = from; idx < to; idx++) {
+          if (solid[idx]) continue;
+          s += temp[idx];
+          c++;
+        }
+        this.partials[chunk * PARTS] = s;
+        this.partials[chunk * PARTS + 1] = c;
+        break;
+      }
+      case K.BUOYANCY: {
+        // warm water rises (−y)
+        const { v, temp, solid } = this;
+        const b = a[0];
+        const mt = a[1];
+        for (let idx = from; idx < to; idx++) if (!solid[idx]) v[idx] -= b * (temp[idx] - mt);
+        break;
+      }
+      case K.CURL: {
+        // rows 1..NY-2 (slices start at 0)
+        const { u, v, curl } = this;
+        for (let j = from + 1; j < to + 1 && j < NY - 1; j++) {
+          for (let i = 1; i < NX - 1; i++) {
+            const idx = j * NX + i;
+            curl[idx] = 0.5 * (v[idx + 1] - v[idx - 1] - (u[idx + NX] - u[idx - NX]));
+          }
+        }
+        break;
+      }
+      case K.CONFINE: {
+        // vorticity confinement: keeps small eddies alive (rows 2..NY-3; slices start at 0)
+        const { u, v, curl, solid } = this;
+        const eps = a[0];
+        for (let j = from + 2; j < to + 2; j++) {
+          for (let i = 2; i < NX - 2; i++) {
+            const idx = j * NX + i;
+            if (solid[idx]) continue;
+            const gx = 0.5 * (Math.abs(curl[idx + 1]) - Math.abs(curl[idx - 1]));
+            const gy = 0.5 * (Math.abs(curl[idx + NX]) - Math.abs(curl[idx - NX]));
+            const len = Math.sqrt(gx * gx + gy * gy) + 1e-5;
+            const w = curl[idx];
+            u[idx] += (eps * gy * w) / len;
+            v[idx] -= (eps * gx * w) / len;
+          }
+        }
+        break;
+      }
+      case K.DAMP: {
+        // damping and speed limit
+        const { u, v, solid } = this;
+        const damp = a[0];
+        const max = CHEM.MAX_FLOW;
+        const max2 = max * max;
+        for (let idx = from; idx < to; idx++) {
+          if (solid[idx]) {
+            u[idx] = 0;
+            v[idx] = 0;
+            continue;
+          }
+          let uu = u[idx] * damp;
+          let vv = v[idx] * damp;
+          const s2 = uu * uu + vv * vv;
+          if (s2 > max2) {
+            const k = max / Math.sqrt(s2);
+            uu *= k;
+            vv *= k;
+          }
+          u[idx] = uu;
+          v[idx] = vv;
+        }
+        break;
+      }
+      case K.DIFFUSE: {
+        // explicit, conservative diffusion with no flux into solids (into the scratch arrays)
+        const { nbR, nbL, nbD, nbU, nbCnt, fluidList } = this;
+        for (const [f, out, k] of this.diffusionSet(a[0])) {
+          for (let q = from; q < to; q++) {
+            const idx = fluidList[q];
+            const c = f[idx];
+            out[idx] = c + k * (f[nbR[idx]] + f[nbL[idx]] + f[nbD[idx]] + f[nbU[idx]] - nbCnt[idx] * c);
+          }
+        }
+        break;
+      }
+      case K.WRITE_BACK: {
+        const fluidList = this.fluidList;
+        for (const [f, out] of this.diffusionSet(a[0])) {
+          for (let q = from; q < to; q++) {
+            const idx = fluidList[q];
+            f[idx] = out[idx];
+          }
+        }
+        break;
+      }
+      case K.DIVERGENCE: {
+        const { u, v, div, nbR, nbL, nbD, nbU, fluidList } = this;
+        for (let q = from; q < to; q++) {
+          const idx = fluidList[q];
+          div[idx] = 0.5 * (u[nbR[idx]] - u[nbL[idx]] + v[nbD[idx]] - v[nbU[idx]]);
+        }
+        break;
+      }
+      case K.SOR_RED:
+      case K.SOR_BLACK: {
+        // red-black over-relaxed Gauss-Seidel: each colour only reads the other, so slices are independent
+        const { p, div, nbR, nbL, nbD, nbU, nbInv } = this;
+        const list = job === K.SOR_RED ? this.fluidRed : this.fluidBlack;
+        const w = 1.7;
+        for (let q = from; q < to; q++) {
+          const idx = list[q];
+          const gs = (p[nbR[idx]] + p[nbL[idx]] + p[nbD[idx]] + p[nbU[idx]] - div[idx]) * nbInv[idx];
+          p[idx] += w * (gs - p[idx]);
+        }
+        break;
+      }
+      case K.GRADIENT: {
+        const { u, v, p, nbR, nbL, nbD, nbU, fluidList } = this;
+        for (let q = from; q < to; q++) {
+          const idx = fluidList[q];
+          const pc = p[idx];
+          const r = nbR[idx];
+          const l = nbL[idx];
+          const d = nbD[idx];
+          const up = nbU[idx];
+          const pR = r === DUMMY ? pc : p[r];
+          const pL = l === DUMMY ? pc : p[l];
+          const pD = d === DUMMY ? pc : p[d];
+          const pU = up === DUMMY ? pc : p[up];
+          u[idx] -= 0.5 * (pR - pL);
+          v[idx] -= 0.5 * (pD - pU);
+        }
+        break;
+      }
+      case K.ADVECT:
+        this.advectRows(from, to, chunk, a[0]);
+        break;
+      case K.RESCALE: {
+        // copy back (rather than swap, so the arrays stay put for other threads), conserving totals
+        const { u, v, temp, o2, co2, nut, sulf, sigA, sigB, bu, bv, bt, bo, bc, bn, bs, bA, bB, solid } = this;
+        const kO = a[0];
+        const kC = a[1];
+        const kN = a[2];
+        const kS = a[3];
+        for (let idx = from; idx < to; idx++) {
+          u[idx] = bu[idx];
+          v[idx] = bv[idx];
+          temp[idx] = bt[idx];
+          sigA[idx] = bA[idx];
+          sigB[idx] = bB[idx];
+          const fluid = idx < N && !solid[idx];
+          o2[idx] = fluid ? bo[idx] * kO : bo[idx];
+          co2[idx] = fluid ? bc[idx] * kC : bc[idx];
+          nut[idx] = fluid ? bn[idx] * kN : bn[idx];
+          sulf[idx] = fluid ? bs[idx] * kS : bs[idx];
+        }
+        break;
+      }
+      case K.CELL_SOURCES: {
+        const { temp, o2, co2, nut, sulf, sigA, sigB, floorCell } = this;
+        const deep = a[0];
+        const dc = a[1];
+        const sox = a[2];
+        const keep = a[3];
+        for (let idx = from; idx < to; idx++) {
+          // the deep sea floor is cold (only deep water: shallows follow the air)
+          if (floorCell[idx] && rowY((idx / NX) | 0) > 300) temp[idx] += (deep - temp[idx]) * dc;
+          // sulfide oxidises (faster when oxygen is around)
+          const s = sulf[idx];
+          if (s >= 1e-5) {
+            const o = o2[idx];
+            const ox = Math.min(s, s * sox * (0.25 + o / (o + 3)));
+            sulf[idx] = s - ox;
+            o2[idx] = Math.max(0, o - ox * 0.5);
+          }
+          if (o2[idx] < 0) o2[idx] = 0;
+          if (co2[idx] < 0) co2[idx] = 0;
+          if (nut[idx] < 0) nut[idx] = 0;
+          // pheromones break down
+          sigA[idx] *= keep;
+          sigB[idx] *= keep;
+        }
+        break;
+      }
+      case K.LIGHT: {
+        const { light, shade, solid, ground, sunCol } = this;
+        const sunNow = a[0];
+        const inv = a[1];
+        const sl = a[2];
+        for (let i = from; i < to; i++) {
+          let cum = 0;
+          for (let j = 0; j < NY; j++) {
+            const idx = j * NX + i;
+            if (solid[idx]) {
+              light[idx] = 0;
+              if (ground[idx]) cum += 2;
+              shade[idx] = 0;
+              continue;
+            }
+            const depth = Math.max(0, rowY(j) - sl);
+            light[idx] = sunNow * sunCol[i] * Math.exp(-depth / CHEM.LIGHT_DEPTH - cum);
+            cum += shade[idx] * inv * CHEM.SHADE_K;
+            shade[idx] = 0;
+          }
+        }
+        break;
+      }
+    }
+  }
 
   private applyForces(dtf: number, P: GodParams, t: Terrain, rng: Rng) {
-    const { u, v, temp, solid, curl, surfRow, windX } = this;
-    let s = 0;
-    let c = 0;
-    for (let idx = 0; idx < N; idx++) {
-      if (solid[idx]) continue;
-      s += temp[idx];
-      c++;
-    }
-    this.meanTemp = c ? s / c : 10;
+    const { u, v, solid, surfRow, windX } = this;
+    const a = this.args;
+    const chunks = this.run(K.MEAN_TEMP, N, CELLS);
+    const c = this.total(1, chunks);
+    this.meanTemp = c ? this.total(0, chunks) / c : 10;
 
     // thermal buoyancy: warm water rises (−y)
-    const b = CHEM.BUOYANCY * dtf;
-    const mt = this.meanTemp;
-    for (let idx = 0; idx < N; idx++) {
-      if (solid[idx]) continue;
-      v[idx] -= b * (temp[idx] - mt);
-    }
+    a[0] = CHEM.BUOYANCY * dtf;
+    a[1] = this.meanTemp;
+    this.run(K.BUOYANCY, N, CELLS);
 
     // wind drags the surface layer
     let windy = 0;
@@ -370,87 +652,53 @@ export class Fields {
     }
     this.eddies = this.eddies.filter((e) => e.age < e.life);
 
-    // vorticity confinement: keeps small eddies alive
-    for (let j = 1; j < NY - 1; j++) {
-      for (let i = 1; i < NX - 1; i++) {
-        const idx = j * NX + i;
-        curl[idx] = 0.5 * (v[idx + 1] - v[idx - 1] - (u[idx + NX] - u[idx - NX]));
-      }
-    }
-    const eps = CHEM.VORTICITY * dtf;
-    for (let j = 2; j < NY - 2; j++) {
-      for (let i = 2; i < NX - 2; i++) {
-        const idx = j * NX + i;
-        if (solid[idx]) continue;
-        const gx = 0.5 * (Math.abs(curl[idx + 1]) - Math.abs(curl[idx - 1]));
-        const gy = 0.5 * (Math.abs(curl[idx + NX]) - Math.abs(curl[idx - NX]));
-        const len = Math.sqrt(gx * gx + gy * gy) + 1e-5;
-        const w = curl[idx];
-        u[idx] += (eps * gy * w) / len;
-        v[idx] -= (eps * gx * w) / len;
-      }
-    }
-
-    // damping and speed limit
-    const damp = 1 - CHEM.DAMPING * dtf;
-    const max2 = CHEM.MAX_FLOW * CHEM.MAX_FLOW;
-    for (let idx = 0; idx < N; idx++) {
-      if (solid[idx]) {
-        u[idx] = 0;
-        v[idx] = 0;
-        continue;
-      }
-      let uu = u[idx] * damp;
-      let vv = v[idx] * damp;
-      const s2 = uu * uu + vv * vv;
-      if (s2 > max2) {
-        const k = CHEM.MAX_FLOW / Math.sqrt(s2);
-        uu *= k;
-        vv *= k;
-      }
-      u[idx] = uu;
-      v[idx] = vv;
-    }
+    // vorticity confinement: keeps small eddies alive (curl in rows 1..NY-2, then push in 2..NY-3)
+    this.run(K.CURL, NY - 2, ROWS);
+    a[0] = CHEM.VORTICITY * dtf;
+    this.run(K.CONFINE, NY - 4, ROWS);
+    a[0] = 1 - CHEM.DAMPING * dtf;
+    this.run(K.DAMP, N, CELLS);
   }
 
-  /** Make the flow divergence-free (SOR pressure solve; solid walls are no-flux). */
+  /** Explicit diffusion of a set of fields (see diffusionSet). */
+  private diffuse(set: number) {
+    for (const [f] of this.diffusionSet(set)) f[DUMMY] = 0;
+    this.args[0] = set;
+    this.run(K.DIFFUSE, this.nFluid, CELLS);
+    this.run(K.WRITE_BACK, this.nFluid, CELLS);
+  }
+
+  /** Make the flow divergence-free (red-black SOR pressure solve; solid walls are no-flux). */
   private project(iters: number) {
-    const { u, v, p, div, nbR, nbL, nbD, nbU, nbInv, fluidList, nFluid } = this;
+    const { u, v, p } = this;
     u[DUMMY] = 0;
     v[DUMMY] = 0;
     p[DUMMY] = 0;
-    for (let k = 0; k < nFluid; k++) {
-      const idx = fluidList[k];
-      div[idx] = 0.5 * (u[nbR[idx]] - u[nbL[idx]] + v[nbD[idx]] - v[nbU[idx]]);
-    }
-    const w = 1.7; // over-relaxation
+    this.run(K.DIVERGENCE, this.nFluid, CELLS);
     for (let it = 0; it < iters; it++) {
-      for (let k = 0; k < nFluid; k++) {
-        const idx = fluidList[k];
-        const gs = (p[nbR[idx]] + p[nbL[idx]] + p[nbD[idx]] + p[nbU[idx]] - div[idx]) * nbInv[idx];
-        p[idx] += w * (gs - p[idx]);
-      }
+      this.run(K.SOR_RED, this.nRed, CELLS);
+      this.run(K.SOR_BLACK, this.nBlack, CELLS);
     }
-    for (let k = 0; k < nFluid; k++) {
-      const idx = fluidList[k];
-      const pc = p[idx];
-      const r = nbR[idx];
-      const l = nbL[idx];
-      const d = nbD[idx];
-      const up = nbU[idx];
-      const pR = r === DUMMY ? pc : p[r];
-      const pL = l === DUMMY ? pc : p[l];
-      const pD = d === DUMMY ? pc : p[d];
-      const pU = up === DUMMY ? pc : p[up];
-      u[idx] -= 0.5 * (pR - pL);
-      v[idx] -= 0.5 * (pD - pU);
-    }
+    this.run(K.GRADIENT, this.nFluid, CELLS);
   }
 
   /** Semi-Lagrangian advection of velocity and all scalars, with a global mass correction. */
   private advect(dtf: number) {
+    const a = this.args;
+    a[0] = dtf / CELL;
+    const chunks = this.run(K.ADVECT, NY, ROWS);
+    // conserve totals of dissolved matter
+    for (let k = 0; k < 4; k++) {
+      const before = this.total(k * 2, chunks);
+      const after = this.total(k * 2 + 1, chunks);
+      a[k] = after <= 1e-9 || Math.abs(before / after - 1) < 1e-7 ? 1 : before / after;
+    }
+    this.run(K.RESCALE, NA, CELLS);
+  }
+
+  /** Advection of rows [j0, j1), into the scratch arrays; sums before and after into partials. */
+  private advectRows(j0: number, j1: number, chunk: number, k: number) {
     const { u, v, temp, o2, co2, nut, sulf, sigA, sigB, solid, bu, bv, bt, bo, bc, bn, bs, bA, bB } = this;
-    const k = dtf / CELL;
     let o2a = 0;
     let o2b = 0;
     let co2a = 0;
@@ -459,7 +707,7 @@ export class Fields {
     let nutb = 0;
     let sa = 0;
     let sb = 0;
-    for (let j = 0; j < NY; j++) {
+    for (let j = j0; j < j1; j++) {
       for (let i = 0; i < NX; i++) {
         const idx = j * NX + i;
         if (solid[idx]) {
@@ -481,12 +729,12 @@ export class Fields {
         if (y < 0) y = 0;
         else if (y > NY - 1) y = NY - 1;
         let i0 = x | 0;
-        let j0 = y | 0;
+        let jj0 = y | 0;
         if (i0 > NX - 2) i0 = NX - 2;
-        if (j0 > NY - 2) j0 = NY - 2;
+        if (jj0 > NY - 2) jj0 = NY - 2;
         const s = x - i0;
-        const t = y - j0;
-        const a = j0 * NX + i0;
+        const t = y - jj0;
+        const a = jj0 * NX + i0;
         const b = a + 1;
         const c = a + NX;
         const d = c + 1;
@@ -529,55 +777,20 @@ export class Fields {
         sb += bs[idx];
       }
     }
-    // swap buffers
-    this.u = bu;
-    this.bu = u;
-    this.v = bv;
-    this.bv = v;
-    this.temp = bt;
-    this.bt = temp;
-    this.o2 = bo;
-    this.bo = o2;
-    this.co2 = bc;
-    this.bc = co2;
-    this.nut = bn;
-    this.bn = nut;
-    this.sulf = bs;
-    this.bs = sulf;
-    this.sigA = bA;
-    this.bA = sigA;
-    this.sigB = bB;
-    this.bB = sigB;
-    // conserve totals of dissolved matter
-    this.rescale(this.o2, o2a, o2b);
-    this.rescale(this.co2, co2a, co2b);
-    this.rescale(this.nut, nuta, nutb);
-    this.rescale(this.sulf, sa, sb);
-  }
-
-  private rescale(f: Float32Array, before: number, after: number) {
-    if (after <= 1e-9) return;
-    const k = before / after;
-    if (Math.abs(k - 1) < 1e-7) return;
-    const solid = this.solid;
-    for (let idx = 0; idx < N; idx++) if (!solid[idx]) f[idx] *= k;
-  }
-
-  /** Explicit, conservative diffusion with no flux into solids. */
-  private diffuse(f: Float32Array, k: number) {
-    const { tmp, nbR, nbL, nbD, nbU, nbCnt, fluidList, nFluid } = this;
-    f[DUMMY] = 0;
-    tmp.set(f);
-    for (let q = 0; q < nFluid; q++) {
-      const idx = fluidList[q];
-      const c = f[idx];
-      tmp[idx] = c + k * (f[nbR[idx]] + f[nbL[idx]] + f[nbD[idx]] + f[nbU[idx]] - nbCnt[idx] * c);
-    }
-    f.set(tmp);
+    const pa = this.partials;
+    const base = chunk * PARTS;
+    pa[base] = o2a;
+    pa[base + 1] = o2b;
+    pa[base + 2] = co2a;
+    pa[base + 3] = co2b;
+    pa[base + 4] = nuta;
+    pa[base + 5] = nutb;
+    pa[base + 6] = sa;
+    pa[base + 7] = sb;
   }
 
   private sources(dtf: number, P: GodParams, t: Terrain, sunNow: number, rng: Rng) {
-    const { temp, o2, co2, nut, sulf, solid, floorCell, u, v, surfRow, airT } = this;
+    const { temp, o2, co2, nut, sulf, solid, u, v, surfRow, airT } = this;
 
     // surface: gas exchange with the atmosphere, heat exchange with the air, solar heating
     this.airTemp = 13 + 9 * sunNow + P.tempOffset;
@@ -606,15 +819,6 @@ export class Fields {
     }
     this.atmO2 = Math.max(0, this.atmO2 - dO / (CHEM.ATM_CELLS * CHEM.O2_EQ));
     this.atmCO2 = Math.max(0, this.atmCO2 - dC / (CHEM.ATM_CELLS * CHEM.CO2_EQ));
-
-    // the deep sea floor is cold
-    const deep = CHEM.DEEP_TEMP + P.tempOffset * 0.5;
-    const dc = CHEM.DEEP_COOL * dtf;
-    for (let idx = 0; idx < N; idx++) {
-      if (!floorCell[idx]) continue;
-      // only deep water is chilled by the floor; shallows follow the air
-      if (rowY((idx / NX) | 0) > 300) temp[idx] += (deep - temp[idx]) * dc;
-    }
 
     // hydrothermal vents: heat, sulfide, minerals, CO₂
     for (const vent of t.vents) {
@@ -653,52 +857,22 @@ export class Fields {
     }
     if (rebuild) this.rebuildSolid(t);
 
-    // sulfide oxidises (faster when oxygen is around)
-    const sox = CHEM.SULF_OX * dtf;
-    for (let idx = 0; idx < N; idx++) {
-      const s = sulf[idx];
-      if (s < 1e-5) continue;
-      const o = o2[idx];
-      const ox = Math.min(s, s * sox * (0.25 + o / (o + 3)));
-      sulf[idx] = s - ox;
-      o2[idx] = Math.max(0, o - ox * 0.5);
-    }
-
-    for (let idx = 0; idx < N; idx++) {
-      if (o2[idx] < 0) o2[idx] = 0;
-      if (co2[idx] < 0) co2[idx] = 0;
-      if (nut[idx] < 0) nut[idx] = 0;
-    }
-
-    // pheromones break down (the "pheromones" law sets how long they last)
-    const keep = P.pheromones > 0.01 ? Math.max(0, 1 - (BIO.SIG_DECAY / P.pheromones) * dtf) : 0;
-    const { sigA, sigB } = this;
-    for (let idx = 0; idx < N; idx++) {
-      sigA[idx] *= keep;
-      sigB[idx] *= keep;
-    }
+    // per cell: the cold deep floor, sulfide oxidation, no negative amounts, pheromones breaking down
+    const a = this.args;
+    a[0] = CHEM.DEEP_TEMP + P.tempOffset * 0.5;
+    a[1] = CHEM.DEEP_COOL * dtf;
+    a[2] = CHEM.SULF_OX * dtf;
+    // (the "pheromones" law sets how long they last)
+    a[3] = P.pheromones > 0.01 ? Math.max(0, 1 - (BIO.SIG_DECAY / P.pheromones) * dtf) : 0;
+    this.run(K.CELL_SOURCES, N, CELLS);
   }
 
   private computeLight(sunNow: number) {
-    const { light, shade, solid, ground } = this;
-    const inv = 1 / Math.max(1, this.shadeTicks);
-    const sl = this.seaLevel;
-    for (let i = 0; i < NX; i++) {
-      let cum = 0;
-      for (let j = 0; j < NY; j++) {
-        const idx = j * NX + i;
-        if (solid[idx]) {
-          light[idx] = 0;
-          if (ground[idx]) cum += 2;
-          shade[idx] = 0;
-          continue;
-        }
-        const depth = Math.max(0, rowY(j) - sl);
-        light[idx] = sunNow * this.sunCol[i] * Math.exp(-depth / CHEM.LIGHT_DEPTH - cum);
-        cum += shade[idx] * inv * CHEM.SHADE_K;
-        shade[idx] = 0;
-      }
-    }
+    const a = this.args;
+    a[0] = sunNow;
+    a[1] = 1 / Math.max(1, this.shadeTicks);
+    a[2] = this.seaLevel;
+    this.run(K.LIGHT, NX, COLUMNS);
     this.shadeTicks = 0;
   }
 

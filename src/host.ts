@@ -15,6 +15,8 @@ export interface SimHost {
   /** Simulation ticks per real second, and milliseconds per tick. */
   readonly tps: number;
   readonly stepMs: number;
+  /** Threads simulating: 1, or more when helper threads share the work. */
+  readonly threads: number;
   /** Called once per animation frame: advance the simulation by `dt` real seconds at `speed`. */
   frame(dt: number, speed: number, paused: boolean, selected: number): void;
   step(): void;
@@ -38,6 +40,7 @@ export class LocalHost implements SimHost {
   readonly ready = true;
   tps = 0;
   stepMs = 0;
+  readonly threads = 1;
   private acc = 0;
   onReset = (_w: World) => {};
   onSelect = (_id: number) => {};
@@ -106,6 +109,7 @@ export class WorkerHost implements SimHost {
   ready = false;
   tps = 0;
   stepMs = 0;
+  threads = 1;
   onReset = (_w: World) => {};
   onSelect = (_id: number) => {};
   onFail = (_m: string) => {};
@@ -123,6 +127,11 @@ export class WorkerHost implements SimHost {
     this.world = new World(seed, params ? { ...params } : undefined, true);
     this.worker = new Worker(new URL('./sim/worker.ts', import.meta.url), { type: 'module' });
     this.worker.onmessage = (e: MessageEvent<FromWorker>) => this.receive(e.data);
+    // helper threads for the simulation, if the page asks for a particular number (?pool=2&kernels=1)
+    const q = new URLSearchParams(location.search);
+    if (q.has('pool') || q.has('kernels')) {
+      this.post({ type: 'threads', pool: Number(q.get('pool') ?? 2), kernels: Number(q.get('kernels') ?? 1) });
+    }
     this.worker.onerror = (e) => {
       e.preventDefault();
       // before the first world exists, fall back to the main thread; afterwards keep the world going
@@ -160,7 +169,7 @@ export class WorkerHost implements SimHost {
         const s = m.snap;
         if (s.gen === this.gen) {
           this.returned.push(...applySnapshot(this.world, s));
-          [this.tps, this.stepMs] = s.perf;
+          [this.tps, this.stepMs, this.threads] = s.perf;
           if (s.select) this.onSelect(s.select);
         }
         this.inFlight = false;

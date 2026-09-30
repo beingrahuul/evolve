@@ -1,6 +1,7 @@
 import { Rng } from './rng';
 import { Noise1D } from './noise';
 import { WORLD_W, WORLD_H, FLOOR_RES, NFLOOR, SKY_H } from './params';
+import { f32 } from './shared';
 
 export interface Minerals {
   iron: number;
@@ -84,7 +85,7 @@ export interface Vent {
 export const richness = (m: Minerals) => m.phosphate + 0.35 * m.iron + 0.15 * m.calcium + 0.05;
 
 export class Terrain {
-  floor = new Float32Array(NFLOOR);
+  floor = f32(NFLOOR);
   rocks: Rock[] = [];
   vents: Vent[] = [];
   nextId = 1;

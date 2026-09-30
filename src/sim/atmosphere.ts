@@ -1,6 +1,7 @@
 import { AIR, AIR_CELL, AIR_NX, AIR_NY, AIR_TOP, GodParams, WORLD_W } from './params';
 import { Rng } from './rng';
 import { Terrain } from './terrain';
+import { f32, i16, i32, u8 } from './shared';
 
 // Grid size, bound when an Atmosphere is created (the world width is chosen per world).
 let N = 0;
@@ -33,47 +34,47 @@ export interface Bolt {
 export class Atmosphere {
   /** Number of air cells (binds the module's grid size first, so it must stay the first field). */
   readonly size = bindGrid();
-  u = new Float32Array(NA);
-  v = new Float32Array(NA);
-  temp = new Float32Array(NA);
-  hum = new Float32Array(NA);
-  cloud = new Float32Array(NA);
+  u = f32(NA);
+  v = f32(NA);
+  temp = f32(NA);
+  hum = f32(NA);
+  cloud = f32(NA);
   /** 1 where the cell is air (above the ground and the sea). */
-  air = new Uint8Array(N);
+  air = u8(N);
   /** Lowest air row per column. */
-  groundRow = new Int16Array(AIR_NX);
+  groundRow = i16(AIR_NX);
   /** World y of the ground or sea surface under each column. */
-  surfaceY = new Float32Array(AIR_NX);
+  surfaceY = f32(AIR_NX);
   /** Ground / sea-surface temperature under each column (set from the sea and the soil). */
-  surfaceT = new Float32Array(AIR_NX).fill(15);
+  surfaceT = f32(AIR_NX).fill(15);
   /** 1 over open sea. */
-  overSea = new Uint8Array(AIR_NX);
+  overSea = u8(AIR_NX);
   /** Rain reaching the ground (smoothed rate, per second) and in the last step. */
-  rain = new Float32Array(AIR_NX);
-  rainStep = new Float32Array(AIR_NX);
+  rain = f32(AIR_NX);
+  rainStep = f32(AIR_NX);
   /** Fraction of sunlight blocked by clouds in each column. */
-  shade = new Float32Array(AIR_NX);
+  shade = f32(AIR_NX);
   /** Vapour taken up from the surface in the last step (for the soil budget). */
-  evap = new Float32Array(AIR_NX);
+  evap = f32(AIR_NX);
   bolt: Bolt | null = null;
   /** Sea-level air temperature set by the climate and the sun (the free atmosphere relaxes to it). */
   climateT = 15;
   weatherPhase = 0;
   stormTimer = 60;
 
-  private bu = new Float32Array(NA);
-  private bv = new Float32Array(NA);
-  private bt = new Float32Array(NA);
-  private bh = new Float32Array(NA);
-  private bc = new Float32Array(NA);
-  private p = new Float32Array(NA);
-  private div = new Float32Array(N);
-  private nbR = new Int32Array(N);
-  private nbL = new Int32Array(N);
-  private nbD = new Int32Array(N);
-  private nbU = new Int32Array(N);
-  private nbInv = new Float32Array(N);
-  private list = new Int32Array(N);
+  private bu = f32(NA);
+  private bv = f32(NA);
+  private bt = f32(NA);
+  private bh = f32(NA);
+  private bc = f32(NA);
+  private p = f32(NA);
+  private div = f32(N);
+  private nbR = i32(N);
+  private nbL = i32(N);
+  private nbD = i32(N);
+  private nbU = i32(N);
+  private nbInv = f32(N);
+  private list = i32(N);
   private nAir = 0;
   private maskKey = '';
 
@@ -340,16 +341,12 @@ export class Atmosphere {
         bc[idx] = (w00 * cloud[a] + w10 * cloud[b] + w01 * cloud[c] + w11 * cloud[d]) * inv;
       }
     }
-    this.u = bu;
-    this.bu = u;
-    this.v = bv;
-    this.bv = v;
-    this.temp = bt;
-    this.bt = temp;
-    this.hum = bh;
-    this.bh = hum;
-    this.cloud = bc;
-    this.bc = cloud;
+    // copy back (rather than swap), so the arrays stay put for other threads that read them
+    u.set(bu);
+    v.set(bv);
+    temp.set(bt);
+    hum.set(bh);
+    cloud.set(bc);
   }
 
   /** A little sideways mixing of heat and vapour between neighbouring air cells. */

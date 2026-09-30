@@ -2,29 +2,30 @@ import type { Atmosphere } from './atmosphere';
 import type { Fields } from './fields';
 import { BIO, CHEM, GodParams, NSOIL, SOIL, SOIL_RES } from './params';
 import type { Terrain } from './terrain';
+import { f32, u8 } from './shared';
 
 /**
  * Land surface, one column every SOIL_RES units: soil water, nutrients, humus (dead organic matter),
  * temperature and snow. Plants and other land life draw on it; rain fills it; runoff drains to the sea.
  */
 export class Soil {
-  moisture = new Float32Array(NSOIL).fill(0.45);
-  nutrient = new Float32Array(NSOIL).fill(0.25);
-  organic = new Float32Array(NSOIL).fill(0.3);
-  temp = new Float32Array(NSOIL).fill(14);
-  snow = new Float32Array(NSOIL);
+  moisture = f32(NSOIL).fill(0.45);
+  nutrient = f32(NSOIL).fill(0.25);
+  organic = f32(NSOIL).fill(0.3);
+  temp = f32(NSOIL).fill(14);
+  snow = f32(NSOIL);
   /** 1 where the column is above the sea. */
-  land = new Uint8Array(NSOIL);
+  land = u8(NSOIL);
   /** Leaf area of land phototrophs in each column (averaged over the last step). */
-  canopy = new Float32Array(NSOIL);
+  canopy = f32(NSOIL);
   /** Highest leaf (smallest y) in each column during the last step. */
-  canopyTop = new Float32Array(NSOIL).fill(1e9);
+  canopyTop = f32(NSOIL).fill(1e9);
   // accumulated by organisms between steps
-  cover = new Float32Array(NSOIL);
-  coverTop = new Float32Array(NSOIL).fill(1e9);
+  cover = f32(NSOIL);
+  coverTop = f32(NSOIL).fill(1e9);
   coverTicks = 0;
   /** Recent rainfall (for the renderer's wet-ground look and the inspector). */
-  wetness = new Float32Array(NSOIL);
+  wetness = f32(NSOIL);
 
   column(x: number): number {
     const i = Math.round(x / SOIL_RES);

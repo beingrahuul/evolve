@@ -399,8 +399,14 @@ export class GodPanel implements AppModule {
     if (frame % 15 === 0) for (const s of this.sliderSync) s();
     if (frame % 30 === 0) {
       const app = this.app;
-      const where = app.host.kind === 'worker' ? 'on its own thread (Web Worker)' : 'on the main thread';
-      this.simInfo.textContent = `Simulating ${where}: ${app.lastStepMs.toFixed(2)} ms per tick, up to ~${Math.round(1000 / Math.max(0.05, app.lastStepMs) / 60)}× real time.`;
+      const n = app.host.threads;
+      const where = app.host.kind === 'local' ? 'on the main thread' : n > 1 ? `on ${n} threads` : 'on its own thread (Web Worker)';
+      const ms = app.lastStepMs;
+      // (the cost per tick is measured when the simulation runs flat out)
+      this.simInfo.textContent =
+        ms > 0
+          ? `Simulating ${where}: ${ms.toFixed(2)} ms per tick, so up to ~${Math.round(1000 / ms / 60)}× real time.`
+          : `Simulating ${where}. Run at Max speed to measure how fast it can go.`;
     }
   }
 }

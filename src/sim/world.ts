@@ -1,5 +1,9 @@
 import { AIR_CELL, AIR_NX, AIR_NY } from './params';
 import { Atmosphere, airRowY, qsat } from './atmosphere';
+import { LifeBoard } from './board';
+import { BrainArena, useBrainArena } from './brain';
+import { isSharing } from './shared';
+import { stepEnvironment } from './environment';
 import { Fields, rowY } from './fields';
 import { A, Archetype, Genome, cloneGenome, makeGenome, mutate } from './genome';
 import { stepLife } from './life';
@@ -54,6 +58,14 @@ export type FieldBrush = 'heat' | 'cool' | 'nutrients' | 'sulfide';
 
 const ANNOUNCE_AT = 12;
 
+/** Helper threads a world can hand work to (see threads.ts). */
+export interface WorldThreads {
+  /** Sense, and run the brains in the arena, for the n organisms on the board, spread over the threads. */
+  sense(w: World, n: number): void;
+  /** Step the environment on its own thread (called every FIELD_EVERY ticks); false if it cannot. */
+  environment(w: World): boolean;
+}
+
 /** Create a world of the given width (bigger worlds are wider). */
 export function makeWorld(seed: number, params?: GodParams, width = 1920): World {
   setWorldWidth(width);
@@ -84,6 +96,14 @@ export class World {
   eventSeq = 0;
   nextOrgId = 1;
 
+  /** What every organism shows the others each tick (read by the sensing threads). */
+  readonly board = new LifeBoard();
+  /** Brains in shared memory, so helper threads can run them (only for a threaded world). */
+  readonly brainArena = isSharing() ? new BrainArena(Math.round(MAX_ORGS * 1.5) + 512, true) : null;
+  /** Helper threads, when the simulation runs on several cores. */
+  threads: WorldThreads | null = null;
+  /** State of the random numbers the environment uses when it runs on its own thread. */
+  envRng = 0;
   readonly orgGrid = new SpatialGrid(WORLD_W, WORLD_H, 40, MAX_ORGS * 2, -SKY_H);
   readonly partGrid = new SpatialGrid(WORLD_W, WORLD_H, 30, MAX_PARTICLES, GRID_TOP);
   maxRadius = 10;
@@ -109,7 +129,9 @@ export class World {
     params?: GodParams,
     blank = false,
   ) {
+    useBrainArena(this.brainArena);
     this.rng = new Rng(seed);
+    this.envRng = (Math.imul(seed, 2654435761) ^ 0x5bd1e995) >>> 0 || 1;
     this.params = params ?? defaultParams();
     if (blank) return;
     this.terrain.generate(this.rng);
@@ -147,7 +169,7 @@ export class World {
     this.stepParticles();
     this.fields.shadeTicks++;
     this.soil.coverTicks++;
-    if (this.tick % FIELD_EVERY === 0) this.stepEnvironment(DT * FIELD_EVERY);
+    if (this.tick % FIELD_EVERY === 0 && !this.threads?.environment(this)) this.stepEnvironment(DT * FIELD_EVERY);
     if (this.tick % 60 === 0) {
       this.stats.record(this);
       if (this.params.autoSeed && this.orgs.length < 5 && this.tick % 600 === 0) {
@@ -177,47 +199,10 @@ export class World {
     }
   }
 
-  /** Sea, sky and soil — coupled — every FIELD_EVERY ticks. */
+  /** Sea, sky and soil — coupled — every FIELD_EVERY ticks (here, or on a helper thread: see threads.ts). */
   stepEnvironment(dtf: number) {
-    const F = this.fields;
-    const air = this.atmosphere;
-    const P = this.params;
-    F.setSeaLevel(this.tideLevel());
-    air.rebuild(this.terrain, F.seaLevel);
-    // the ground and sea surface warm the air above them
-    for (let i = 0; i < AIR_NX; i++) {
-      const x = (i + 0.5) * AIR_CELL;
-      if (air.overSea[i]) {
-        const wc = F.column(x);
-        const j = F.surfRow[wc];
-        air.surfaceT[i] = j >= 0 ? F.temp[j * NX + wc] : 15;
-      } else {
-        let t = 0;
-        let c = 0;
-        for (let k = -2; k <= 2; k++) {
-          const sc = this.soil.column(x + k * 8);
-          t += this.soil.temp[sc];
-          c++;
-        }
-        air.surfaceT[i] = t / c;
-      }
-    }
-    air.climateT = 14 + 2 * this.sunNow + P.tempOffset;
-    const strike = air.step(dtf, P, this.rng);
+    const strike = stepEnvironment(this, dtf, this.params, this.sunNow, this.tideLevel(), this.rng);
     if (strike) this.lightningStrike(strike.x, strike.y);
-    // the air drives the sea: wind stress, air temperature, rain, cloud shade
-    for (let i = 0; i < NX; i++) {
-      const x = (i + 0.5) * CELL;
-      const ac = air.column(x);
-      F.windX[i] = air.surfaceWind(x) / 8;
-      // the sea trades heat with the air above it, anchored to the climate
-      F.airT[i] = 0.5 * air.surfaceAirT(x) + 0.5 * (13 + 9 * this.sunNow + P.tempOffset);
-      F.sunCol[i] = 1 - 0.7 * air.shade[ac];
-      const r = air.rainStep[ac];
-      if (r > 0 && air.overSea[ac]) F.addSurface(i, -0.4 * r, 0.004 * r);
-    }
-    F.step(dtf, P, this.terrain, this.sunNow, this.rng);
-    this.soil.step(dtf, P, this.terrain, air, F, this.sunNow);
   }
 
   /** Lightning: kills what it hits; over the sea it forges organic molecules, on land it fixes nitrogen. */
@@ -326,6 +311,7 @@ export class World {
   }
 
   private onRemoved(o: Organism) {
+    o.brain.release();
     this.orgById.delete(o.id);
     this.totalDied++;
     this.recentDeaths.set(o.id, o.cause);

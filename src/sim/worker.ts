@@ -6,11 +6,42 @@
 import { applyCommand } from './commands';
 import { blobToWorld, worldToBlob } from './savefile';
 import { TPS } from './params';
+import { canShareMemory, isSharing, shareMemory } from './shared';
 import { FromWorker, SyncSource, ToWorker } from './sync';
+import { HelperHandle, Threads } from './threads';
 import { World, makeWorld } from './world';
 
 const ctx = self as unknown as DedicatedWorkerGlobalScope;
 const sync = new SyncSource();
+
+// On a cross-origin-isolated page with cores to spare, worlds live in shared memory so helper
+// threads can share the work (threads.ts).
+const cores = navigator.hardwareConcurrency || 2;
+shareMemory(canShareMemory() && cores >= 3);
+const spawnHelper = (): HelperHandle => new Worker(new URL('./helper.ts', import.meta.url), { type: 'module' });
+let threads: Threads | null = null;
+/** Helper threads to start (the page can override these: ?pool=…&kernels=…). */
+let poolHelpers = cores >= 8 ? 2 : 1;
+let kernelHelpers = cores >= 6 ? 1 : 0;
+
+/** Start helper threads for a new world (sensing on one or more, the environment on another). */
+function startThreads(w: World) {
+  threads?.dispose();
+  threads = null;
+  if (!isSharing()) return;
+  try {
+    // a pool for sensing and merging, plus the environment thread and a pool for its water
+    threads = new Threads(w, spawnHelper, poolHelpers, kernelHelpers);
+    w.threads = threads;
+  } catch (err) {
+    console.warn('Could not start helper threads; simulating on one thread.', err);
+  }
+}
+
+/** Threads working on the simulation now: this one plus the helpers that are up. */
+function threadCount(w: World): number {
+  return 1 + (w.threads && threads ? threads.helping : 0);
+}
 
 let world: World | null = null;
 let gen = 0;
@@ -118,7 +149,14 @@ function pump() {
 
 function sendFrame(w: World) {
   wantFrame = false;
-  const { snap, transfer } = sync.build(w, { gen, full: false, changed, selected, perf: [paused ? 0 : tps, stepMs], select: pendingSelect });
+  const { snap, transfer } = sync.build(w, {
+    gen,
+    full: false,
+    changed,
+    selected,
+    perf: [paused ? 0 : tps, stepMs, threadCount(w)],
+    select: pendingSelect,
+  });
   changed = false;
   pendingSelect = undefined;
   send({ type: 'frame', snap }, transfer);
@@ -126,12 +164,13 @@ function sendFrame(w: World) {
 
 function adopt(w: World) {
   world = w;
+  startThreads(w);
   gen++;
   sync.reset();
   owed = 0;
   changed = true;
   pendingSelect = undefined;
-  const { snap, transfer } = sync.build(w, { gen, full: true, changed: true, selected: -1, perf: [0, stepMs] });
+  const { snap, transfer } = sync.build(w, { gen, full: true, changed: true, selected: -1, perf: [0, stepMs, 1] });
   send({ type: 'reset', gen, seed: w.seed, width: w.width, params: { ...w.params }, snap }, transfer);
   // the world runs from now on, whether or not anyone is watching
   clock = performance.now();
@@ -142,6 +181,10 @@ ctx.onmessage = async (e: MessageEvent<ToWorker>) => {
   const m = e.data;
   try {
     switch (m.type) {
+      case 'threads':
+        poolHelpers = m.pool;
+        kernelHelpers = m.kernels;
+        break;
       case 'new':
         adopt(makeWorld(m.seed, m.params ? { ...m.params } : undefined, m.width));
         break;
