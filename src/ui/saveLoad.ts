@@ -1,31 +1,10 @@
-import { SaveMeta, deserializeWorld, serializeWorld } from '../sim/serialize';
+import { SAVE_VERSION, SaveMeta } from '../sim/serialize';
 import type { World } from '../sim/world';
 
-// Save files are gzip-compressed JSON. The quick-save slot lives in IndexedDB.
+// Save files are gzip-compressed JSON, made wherever the simulation runs (see sim/savefile.ts).
+// Here: downloading and opening files, and the quick-save slot in IndexedDB.
 
-async function gzip(text: string): Promise<Blob> {
-  const stream = new Blob([text]).stream().pipeThrough(new CompressionStream('gzip'));
-  return new Response(stream).blob();
-}
-
-async function gunzipToText(blob: Blob): Promise<string> {
-  const head = new Uint8Array(await blob.slice(0, 2).arrayBuffer());
-  if (head[0] !== 0x1f || head[1] !== 0x8b) return blob.text(); // plain JSON
-  const stream = blob.stream().pipeThrough(new DecompressionStream('gzip'));
-  return new Response(stream).text();
-}
-
-export async function worldToBlob(w: World): Promise<Blob> {
-  return gzip(JSON.stringify(serializeWorld(w)));
-}
-
-export async function blobToWorld(blob: Blob): Promise<World> {
-  const text = await gunzipToText(blob);
-  return deserializeWorld(JSON.parse(text));
-}
-
-export async function downloadWorld(w: World) {
-  const blob = await worldToBlob(w);
+export function downloadBlob(blob: Blob, w: World) {
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
@@ -34,23 +13,14 @@ export async function downloadWorld(w: World) {
   a.click();
   a.remove();
   setTimeout(() => URL.revokeObjectURL(url), 5000);
-  return blob.size;
 }
 
-export function pickWorldFile(): Promise<World | null> {
-  return new Promise((resolve, reject) => {
+export function pickFile(): Promise<Blob | null> {
+  return new Promise((resolve) => {
     const input = document.createElement('input');
     input.type = 'file';
     input.accept = '.primordial,.json,.gz';
-    input.addEventListener('change', async () => {
-      const f = input.files?.[0];
-      if (!f) return resolve(null);
-      try {
-        resolve(await blobToWorld(f));
-      } catch (e) {
-        reject(e);
-      }
-    });
+    input.addEventListener('change', () => resolve(input.files?.[0] ?? null));
     input.click();
   });
 }
@@ -66,9 +36,16 @@ function db(): Promise<IDBDatabase> {
   });
 }
 
-export async function quickSave(w: World): Promise<SaveMeta> {
-  const blob = await worldToBlob(w);
-  const meta: SaveMeta = serializeMeta(w);
+export async function quickSave(blob: Blob, w: World): Promise<SaveMeta> {
+  const meta: SaveMeta = {
+    version: SAVE_VERSION,
+    seed: w.seed,
+    width: w.width,
+    savedAt: new Date().toISOString(),
+    day: w.days + 1,
+    population: w.orgs.length,
+    species: w.species.alive().length,
+  };
   const d = await db();
   await new Promise<void>((resolve, reject) => {
     const tx = d.transaction('saves', 'readwrite');
@@ -79,14 +56,14 @@ export async function quickSave(w: World): Promise<SaveMeta> {
   return meta;
 }
 
-export async function quickLoad(): Promise<World | null> {
+export async function quickLoad(): Promise<Blob | null> {
   const d = await db();
   const rec = await new Promise<{ blob: Blob; meta: SaveMeta } | undefined>((resolve, reject) => {
     const req = d.transaction('saves').objectStore('saves').get('quick');
     req.onsuccess = () => resolve(req.result);
     req.onerror = () => reject(req.error);
   });
-  return rec ? blobToWorld(rec.blob) : null;
+  return rec ? rec.blob : null;
 }
 
 export async function quickSaveMeta(): Promise<SaveMeta | null> {
@@ -100,15 +77,4 @@ export async function quickSaveMeta(): Promise<SaveMeta | null> {
   } catch {
     return null;
   }
-}
-
-function serializeMeta(w: World): SaveMeta {
-  return {
-    version: 3,
-    seed: w.seed,
-    savedAt: new Date().toISOString(),
-    day: w.days + 1,
-    population: w.orgs.length,
-    species: w.species.alive().length,
-  };
 }

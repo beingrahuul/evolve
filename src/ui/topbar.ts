@@ -1,4 +1,4 @@
-import { Atom, Cloud, CloudLightning, CloudRain, CloudSun, Moon, Pause, Play, StepForward, Sun, Waves } from 'lucide';
+import { Cloud, CloudLightning, CloudRain, CloudSun, Moon, Pause, Play, StepForward, Sun, Waves } from 'lucide';
 import { weatherWord } from './inspector';
 import { App, AppModule, SPEEDS } from '../app';
 import { TPS } from '../sim/params';
@@ -8,7 +8,6 @@ export class TopBar implements AppModule {
   readonly root: HTMLElement;
   private clock = h('span', { class: 'clock-text' });
   private clockIcon = h('span', { class: 'clock-icon' });
-  private seed = h('span', { class: 'brand-seed' });
   private speedBtns: HTMLButtonElement[] = [];
   private playBtn: HTMLButtonElement;
   private vitals = {
@@ -24,7 +23,10 @@ export class TopBar implements AppModule {
   private tideText = h('span', { class: 'weather-text' });
   private lastWeather = '';
 
-  constructor(private app: App) {
+  constructor(
+    private app: App,
+    extras: HTMLElement[],
+  ) {
     this.playBtn = h('button', { class: 'btn icon-btn', title: 'Pause / play (Space)', onclick: () => this.togglePause() });
     const stepBtn = h(
       'button',
@@ -58,14 +60,7 @@ export class TopBar implements AppModule {
 
     this.root = h(
       'header',
-      { id: 'topbar', class: 'panel' },
-      h(
-        'div',
-        { class: 'brand' },
-        h('div', { class: 'logo' }, icon(Atom, 20)),
-        h('div', {}, h('div', { class: 'brand-title' }, 'Primordial'), this.seed),
-      ),
-      h('div', { class: 'divider' }),
+      { id: 'topbar' },
       h('div', { class: 'clock' }, this.clockIcon, this.clock),
       h('div', { class: 'weather', title: 'Weather and tide' }, this.weatherIcon, this.weatherText, h('span', { class: 'tide-icon' }, icon(Waves, 14)), this.tideText),
       h('div', { class: 'divider' }),
@@ -79,17 +74,13 @@ export class TopBar implements AppModule {
         h('span', { title: 'Atmospheric oxygen (relative)' }, 'O₂ ', this.vitals.o2),
         h('span', { title: 'Actual simulation speed' }, 'Speed ', this.vitals.rate),
       ),
+      h('div', { class: 'top-extras' }, ...extras),
     );
-    this.onWorldChanged();
     this.update(0);
   }
 
   togglePause() {
     this.app.paused = !this.app.paused;
-  }
-
-  onWorldChanged() {
-    this.seed.textContent = `seed ${this.app.world.seed}`;
   }
 
   update(frame: number) {
@@ -129,5 +120,6 @@ export class TopBar implements AppModule {
     this.vitals.species.textContent = String(sp);
     this.vitals.o2.textContent = (w.fields.atmO2 * 100).toFixed(1);
     this.vitals.rate.textContent = app.paused ? 'paused' : `${(app.tps / TPS).toFixed(1)}×`;
+    this.vitals.rate.parentElement!.title = `Actual simulation speed (${app.host.kind === 'worker' ? 'simulated on its own thread' : 'simulated on the main thread'}, ${app.lastStepMs.toFixed(2)} ms per tick)`;
   }
 }

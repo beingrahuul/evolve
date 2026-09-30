@@ -66,6 +66,36 @@ export class Organism {
   dead = false;
   cause = '';
 
+  // ---- sex -------------------------------------------------------------------
+  /** Seconds spent ready to breed and waiting for a mate (0 when not courting). */
+  courting = 0;
+  /** Seconds since it last mated (for the renderer's flash), counting up from 0. */
+  sinceMating = 1e9;
+  /** Id of the other parent if it was conceived sexually (0 = divided from one parent). */
+  father = 0;
+  mates = 0;
+
+  // ---- signalling ------------------------------------------------------------
+  emitA = 0;
+  emitB = 0;
+
+  // ---- learning --------------------------------------------------------------
+  /** Reward signal driving plastic synapses: food intake better (+) or worse (−) than expected, minus pain. */
+  reward = 0;
+  /** Recent (≈0.5 s) and expected (≈10 s) food intake rates, per unit mass. */
+  gainFast = 0;
+  gainSlow = 0;
+  /** Lifetime energy intake at the last tick (to measure this tick's intake). */
+  intakeMark = 0;
+
+  // ---- keeping a copy of the world on another thread in step (see sync.ts) ----
+  /** The other thread has been told about this organism. */
+  synced = false;
+  /** The genome changed (god-mode mutation) since the other thread last saw it. */
+  genomeDirty = false;
+  /** Frame stamp of the last update received (main-thread copies only). */
+  syncMark = 0;
+
   // lifetime record
   eLight = 0;
   eChem = 0;
@@ -103,7 +133,9 @@ export class Organism {
   /** Recompute everything that depends on the genome. */
   derive() {
     allocFractions(this.genome, this.coreFrac);
-    this.brainCost = BIO.BRAIN_COST * (this.brain.hiddenCount + 0.2 * this.brain.connCount);
+    this.brainCost =
+      BIO.BRAIN_COST * (this.brain.hiddenCount + 0.2 * this.brain.connCount) +
+      (this.genome.learn > 0 ? BIO.LEARN_COST * this.genome.learn * this.brain.plasticCount : 0);
     this.nCells = Math.max(1, Math.min(this.targetCells, this.developedFor(this.mass)));
     this.layout();
   }

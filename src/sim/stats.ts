@@ -17,6 +17,14 @@ export interface Sample {
   land?: number;
   cloud?: number;
   rain?: number;
+  /** Births in the last interval, and the fraction that had two parents. */
+  births?: number;
+  sexual?: number;
+  /** Mean sex drive and learning rate; fraction of organisms that learn, and that are signalling now. */
+  sexDrive?: number;
+  learnRate?: number;
+  learners?: number;
+  signalers?: number;
 }
 
 export class Stats {
@@ -30,9 +38,17 @@ export class Stats {
     let chemo = 0;
     let hetero = 0;
     let land = 0;
+    let sexDrive = 0;
+    let learnRate = 0;
+    let learners = 0;
+    let signalers = 0;
     for (const o of w.orgs) {
       counts.set(o.species, (counts.get(o.species) ?? 0) + 1);
       biomass += o.mass;
+      sexDrive += o.genome.sex;
+      learnRate += o.genome.learn;
+      if (o.genome.learn > 0 && o.brain.plasticCount > 0) learners++;
+      if (o.emitA + o.emitB > 0.05) signalers++;
       if (o.onLand) {
         land++;
         continue;
@@ -46,6 +62,8 @@ export class Stats {
       else chemo++;
     }
     const species = [...counts.entries()].sort((a, b) => b[1] - a[1]);
+    const n = Math.max(1, w.orgs.length);
+    const births = w.birthsSexual + w.birthsClonal;
     this.samples.push({
       tick: w.tick,
       pop: w.orgs.length,
@@ -62,7 +80,15 @@ export class Stats {
       land,
       cloud: w.atmosphere.summary().cover,
       rain: w.atmosphere.summary().rain,
+      births,
+      sexual: births ? w.birthsSexual / births : 0,
+      sexDrive: sexDrive / n,
+      learnRate: learnRate / n,
+      learners: learners / n,
+      signalers: signalers / n,
     });
+    w.birthsSexual = 0;
+    w.birthsClonal = 0;
     if (this.samples.length > this.max) this.samples.splice(0, this.samples.length - this.max);
   }
 

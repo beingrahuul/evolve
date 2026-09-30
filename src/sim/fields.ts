@@ -1,11 +1,18 @@
-import { NX, NY, CELL, CHEM, GRID_TOP, WORLD_H, GodParams } from './params';
+import { NX, NY, BIO, CELL, CHEM, GRID_TOP, WORLD_H, GodParams } from './params';
 import { Terrain, richness } from './terrain';
 import { Rng } from './rng';
 
-const N = NX * NY;
+// Grid size, bound when a Fields is created (the world width is chosen per world).
+let N = 0;
 /** Arrays carry one extra slot (index N) that is always 0; missing neighbours point at it. */
-const NA = N + 1;
-const DUMMY = N;
+let NA = 0;
+let DUMMY = 0;
+function bindGrid(): number {
+  N = NX * NY;
+  NA = N + 1;
+  DUMMY = N;
+  return N;
+}
 
 /** World y of the centre of grid row j. */
 export const rowY = (j: number) => GRID_TOP + (j + 0.5) * CELL;
@@ -16,6 +23,8 @@ export const rowY = (j: number) => GRID_TOP + (j + 0.5) * CELL;
  * Cells above the (tidal) sea level or inside the ground are masked out.
  */
 export class Fields {
+  /** Number of grid cells (binds the module's grid size first, so it must stay the first field). */
+  readonly size = bindGrid();
   u = new Float32Array(NA);
   v = new Float32Array(NA);
   temp = new Float32Array(NA);
@@ -23,6 +32,9 @@ export class Fields {
   co2 = new Float32Array(NA);
   nut = new Float32Array(NA);
   sulf = new Float32Array(NA);
+  /** Pheromones (chemical signals released by organisms): two channels whose meaning evolves. */
+  sigA = new Float32Array(NA);
+  sigB = new Float32Array(NA);
   light = new Float32Array(N);
   /** Chlorophyll-mass accumulated by organisms since the last light update. */
   shade = new Float32Array(N);
@@ -64,6 +76,8 @@ export class Fields {
   private bc = new Float32Array(NA);
   private bn = new Float32Array(NA);
   private bs = new Float32Array(NA);
+  private bA = new Float32Array(NA);
+  private bB = new Float32Array(NA);
   private p = new Float32Array(NA);
   private div = new Float32Array(N);
   private curl = new Float32Array(N);
@@ -129,7 +143,7 @@ export class Fields {
   }
 
   private applyMask(conserve: boolean) {
-    const { solid, ground, temp, o2, co2, nut, sulf, u, v } = this;
+    const { solid, ground, temp, o2, co2, nut, sulf, sigA, sigB, u, v } = this;
     const sl = this.seaLevel;
     let changed = false;
     // bottom-up, so a flooding cell can take water from an already-wet cell below
@@ -151,6 +165,8 @@ export class Fields {
           }
           u[idx] = 0;
           v[idx] = 0;
+          sigA[idx] = 0;
+          sigB[idx] = 0;
         } else if (conserve && below >= 0) {
           // flooded: shares the water of the cell below it
           temp[idx] = temp[below];
@@ -158,6 +174,8 @@ export class Fields {
           co2[idx] = co2[below] *= 0.5;
           nut[idx] = nut[below] *= 0.5;
           sulf[idx] = sulf[below] *= 0.5;
+          sigA[idx] = sigA[below];
+          sigB[idx] = sigB[below];
         }
         solid[idx] = s;
       }
@@ -263,6 +281,8 @@ export class Fields {
     this.diffuse(this.co2, CHEM.DIFF_GAS);
     this.diffuse(this.nut, CHEM.DIFF_NUT);
     this.diffuse(this.sulf, CHEM.DIFF_SULF);
+    this.diffuse(this.sigA, BIO.DIFF_SIG);
+    this.diffuse(this.sigB, BIO.DIFF_SIG);
     this.sources(dtf, P, t, sunNow, rng);
     this.computeLight(sunNow);
   }
@@ -429,7 +449,7 @@ export class Fields {
 
   /** Semi-Lagrangian advection of velocity and all scalars, with a global mass correction. */
   private advect(dtf: number) {
-    const { u, v, temp, o2, co2, nut, sulf, solid, bu, bv, bt, bo, bc, bn, bs } = this;
+    const { u, v, temp, o2, co2, nut, sulf, sigA, sigB, solid, bu, bv, bt, bo, bc, bn, bs, bA, bB } = this;
     const k = dtf / CELL;
     let o2a = 0;
     let o2b = 0;
@@ -450,6 +470,8 @@ export class Fields {
           bc[idx] = co2[idx];
           bn[idx] = nut[idx];
           bs[idx] = sulf[idx];
+          bA[idx] = sigA[idx];
+          bB[idx] = sigB[idx];
           continue;
         }
         let x = i - u[idx] * k;
@@ -489,6 +511,8 @@ export class Fields {
           bc[idx] = co2[idx];
           bn[idx] = nut[idx];
           bs[idx] = sulf[idx];
+          bA[idx] = sigA[idx];
+          bB[idx] = sigB[idx];
         } else {
           const inv = 1 / ms;
           bt[idx] = (m00 * temp[a] + m10 * temp[b] + m01 * temp[c] + m11 * temp[d]) * inv;
@@ -496,6 +520,8 @@ export class Fields {
           bc[idx] = (m00 * co2[a] + m10 * co2[b] + m01 * co2[c] + m11 * co2[d]) * inv;
           bn[idx] = (m00 * nut[a] + m10 * nut[b] + m01 * nut[c] + m11 * nut[d]) * inv;
           bs[idx] = (m00 * sulf[a] + m10 * sulf[b] + m01 * sulf[c] + m11 * sulf[d]) * inv;
+          bA[idx] = (m00 * sigA[a] + m10 * sigA[b] + m01 * sigA[c] + m11 * sigA[d]) * inv;
+          bB[idx] = (m00 * sigB[a] + m10 * sigB[b] + m01 * sigB[c] + m11 * sigB[d]) * inv;
         }
         o2b += bo[idx];
         co2b += bc[idx];
@@ -518,6 +544,10 @@ export class Fields {
     this.bn = nut;
     this.sulf = bs;
     this.bs = sulf;
+    this.sigA = bA;
+    this.bA = sigA;
+    this.sigB = bB;
+    this.bB = sigB;
     // conserve totals of dissolved matter
     this.rescale(this.o2, o2a, o2b);
     this.rescale(this.co2, co2a, co2b);
@@ -638,6 +668,14 @@ export class Fields {
       if (o2[idx] < 0) o2[idx] = 0;
       if (co2[idx] < 0) co2[idx] = 0;
       if (nut[idx] < 0) nut[idx] = 0;
+    }
+
+    // pheromones break down (the "pheromones" law sets how long they last)
+    const keep = P.pheromones > 0.01 ? Math.max(0, 1 - (BIO.SIG_DECAY / P.pheromones) * dtf) : 0;
+    const { sigA, sigB } = this;
+    for (let idx = 0; idx < N; idx++) {
+      sigA[idx] *= keep;
+      sigB[idx] *= keep;
     }
   }
 

@@ -1,12 +1,12 @@
 // Runs the simulation without graphics and prints ecosystem vitals — used for tuning.
-// Usage: npx tsx scripts/headless.ts [seconds=600] [seed=42]
-import { World } from '../src/sim/world';
+// Usage: npx tsx scripts/headless.ts [seconds=600] [seed=42] [width=1920]
+import { makeWorld } from '../src/sim/world';
 import { A } from '../src/sim/genome';
 import { TPS } from '../src/sim/params';
 
 const seconds = Number(process.argv[2] ?? 600);
 const seed = Number(process.argv[3] ?? 42);
-const w = new World(seed);
+const w = makeWorld(seed, undefined, Number(process.argv[4] ?? 1920));
 const t0 = performance.now();
 let lastPrint = performance.now();
 let lastTick = 0;

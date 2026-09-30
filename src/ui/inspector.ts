@@ -117,20 +117,10 @@ export class Inspector implements AppModule {
       { class: 'actions' },
       followBtn,
       hlBtn,
-      this.action(Copy, 'Clone', () => {
-        const c = w.clone(o);
-        if (c) w.log(`You cloned organism #${o.id}.`, 'god');
-      }),
-      this.action(Heart, 'Feed', () => {
-        o.energy = o.ecap;
-        o.health = 1;
-        o.nutrient = o.mass * BIO.NUT_RATIO * 1.5;
-      }),
-      this.action(Dna, 'Mutate', () => {
-        w.mutateOrganism(o, 5);
-        this.onSelection();
-      }),
-      this.action(Skull, 'Kill', () => w.kill(o, 'Struck down by god'), 'danger'),
+      this.action(Copy, 'Clone', () => app.cmd({ type: 'clone', id: o.id })),
+      this.action(Heart, 'Feed', () => app.cmd({ type: 'feed', id: o.id })),
+      this.action(Dna, 'Mutate', () => app.cmd({ type: 'mutate', id: o.id })),
+      this.action(Skull, 'Kill', () => app.cmd({ type: 'kill', id: o.id }), 'danger'),
     );
 
     const vit = {
@@ -164,7 +154,17 @@ export class Inspector implements AppModule {
       return b;
     });
 
-    const genes = kvGrid(['Divides at', 'Ideal temp', 'Lifespan', 'Mutation rate', 'Inner clock', 'Toxin resist', 'Signature']);
+    const genes = kvGrid(['Divides at', 'Ideal temp', 'Lifespan', 'Mutation rate', 'Inner clock', 'Toxin resist', 'Signature', 'Sex drive', 'Learning rate']);
+    const repro = kvGrid(['Breeds', 'Parents', 'Now', 'Mates']);
+    const learnBar = bar('Reward', '#facc15');
+    const learning = kvGrid(['Plastic synapses', 'Learned so far', 'Expects']);
+    const learnNote = h('div', { class: 'caption' });
+    const sig = {
+      outA: bar('Releasing A', '#b86bff'),
+      outB: bar('Releasing B', '#4de8f0'),
+      inA: bar('Smells A', '#b86bff'),
+      inB: bar('Smells B', '#4de8f0'),
+    };
     const bodyCaption = h('div', { class: 'caption' });
     const bodySection = section('Body plan', h('div', { class: 'brain-wrap' }, this.bodyView.canvas), bodyCaption);
     const brainCaption = h('div', { class: 'caption' });
@@ -177,6 +177,9 @@ export class Inspector implements AppModule {
       bodySection,
       section('Body', stats.root),
       section('Where its energy comes from', srcBar, srcLegend),
+      section('Reproduction', repro.root),
+      section('Learning', learnBar.root, learning.root, learnNote),
+      section('Signals', sig.outA.root, sig.outB.root, sig.inA.root, sig.inB.root),
       section('Cell anatomy', organs),
       section('Genome', genes.root),
       section('Brain', h('div', { class: 'brain-wrap' }, this.brain.canvas), brainCaption),
@@ -212,8 +215,11 @@ export class Inspector implements AppModule {
       else parts.push(o.thrust > 0.08 && o.frac[3] > 0.02 ? `swimming ${pct(o.thrust)}` : 'drifting');
       if (o.onLand && o.hydration < 0.4) parts.push('drying out!');
       if (Math.abs(o.turn) > 0.25) parts.push(o.turn > 0 ? 'turning right' : 'turning left');
+      if (o.courting > 0) parts.push('courting a mate');
+      if (o.sinceMating < 3) parts.push('just mated');
       if (o.digesting > 0) parts.push('digesting a meal');
       else if (o.eating) parts.push('mouth open');
+      if (o.emitA > 0.2 || o.emitB > 0.2) parts.push(`releasing pheromone ${o.emitA >= o.emitB ? 'A' : 'B'}`);
       if (!o.onLand && o.frac[6] > 0.03) parts.push(o.inflate > 0.6 ? 'rising' : o.inflate < 0.35 ? 'sinking' : 'hovering');
       if (o.glow > 0.2) parts.push('glowing');
       if (o.touching) parts.push(`touching ${o.touching}`);
@@ -250,6 +256,49 @@ export class Inspector implements AppModule {
       genes.set('Inner clock', `${g.oscFreq.toFixed(2)} Hz`);
       genes.set('Toxin resist', pct(o.resist));
       genes.set('Signature', g.sig.map((s) => s.toFixed(2)).join(' · '));
+      genes.set('Sex drive', g.sex < 0.01 ? 'none (clonal)' : pct(g.sex));
+      genes.set('Learning rate', g.learn < 0.005 ? 'none (instinct)' : g.learn.toFixed(2));
+
+      // reproduction
+      const wait = g.sex * BIO.MATE_WAIT;
+      repro.set(
+        'Breeds',
+        wait < 0.5
+          ? 'alone, by dividing'
+          : `sexually if it finds a mate within ${wait.toFixed(0)} s, else alone`,
+      );
+      repro.set('Parents', o.parent ? (o.father ? `#${o.parent} × #${o.father} (sexual)` : `#${o.parent} (divided)`) : 'created by god');
+      const ready = o.mass >= g.divMass && o.energy > 0.5 * o.ecap;
+      repro.set(
+        'Now',
+        o.courting > 0
+          ? `courting, ${Math.max(0, wait - o.courting).toFixed(0)} s of patience left`
+          : ready
+            ? 'ready to breed'
+            : `growing (${pct(o.mass / g.divMass)})`,
+      );
+      repro.set('Mates', o.mates ? `${o.mates} mating${o.mates > 1 ? 's' : ''}` : 'none yet');
+
+      // learning
+      const b = o.brain;
+      const learns = g.learn > 0 && b.plasticCount > 0 && w.params.learning > 0;
+      learnBar.set((o.reward + 1) / 2, `${o.reward >= 0 ? '+' : ''}${o.reward.toFixed(2)}`);
+      learning.set('Plastic synapses', b.plasticCount ? `${b.plasticCount} of ${b.connCount}` : 'none');
+      learning.set('Learned so far', learns ? `Δw ${b.learnedDrift().toFixed(2)} on average` : '—');
+      learning.set('Expects', `${fmt(o.gainSlow, 3)} energy per unit mass per s`);
+      learnNote.textContent = learns
+        ? 'Reward is food intake better (or worse) than it expected, minus pain. Plastic synapses that were active just before a reward strengthen; learned weights fade back to the genome\'s over a minute or two and are not inherited.'
+        : g.learn > 0 && b.plasticCount === 0
+          ? 'It could learn, but none of its synapses are plastic yet.'
+          : 'Its behaviour is pure instinct: its synapses are fixed by its genes.';
+
+      // signals
+      sig.outA.set(o.emitA, pct(o.emitA));
+      sig.outB.set(o.emitB, pct(o.emitB));
+      const inA = o.onLand ? 0 : Math.tanh(w.fields.sigA[ci] * 2);
+      const inB = o.onLand ? 0 : Math.tanh(w.fields.sigB[ci] * 2);
+      sig.inA.set(inA, pct(inA));
+      sig.inB.set(inB, pct(inB));
 
       this.bodyView.draw(o);
       const target = o.targetCells;
@@ -258,7 +307,7 @@ export class Inspector implements AppModule {
           ? 'Single-celled. A mutation can add specialised cells to its body plan.'
           : `${o.nCells} of ${target} cells grown: ${bodySummary(o)}. Buds off a small propagule to reproduce.`;
       this.brain.draw(o);
-      brainCaption.textContent = `${o.brain.hiddenCount} hidden neurons · ${o.brain.connCount} synapses. Teal = excite, red = inhibit. Bright nodes are firing.`;
+      brainCaption.textContent = `${o.brain.hiddenCount} hidden neurons · ${o.brain.connCount} synapses. Teal = excite, red = inhibit, dashed = plastic (gold where it has learned). Bright nodes are firing.`;
     };
   }
 
@@ -268,8 +317,9 @@ export class Inspector implements AppModule {
 
   private buildRock(id: number) {
     const w = this.app.world;
-    const rock = w.terrain.rocks.find((r) => r.id === id);
-    if (!rock) return;
+    const found = w.terrain.rocks.find((r) => r.id === id);
+    if (!found) return;
+    let rock = found;
     const t = rock.type;
     const col = `rgb(${t.color.map((c) => Math.round(c * 255)).join(',')})`;
     this.setHead(`${t.name} stone`, `Rock #${rock.id}`, col);
@@ -292,13 +342,14 @@ export class Inspector implements AppModule {
     this.body.append(
       h('p', { class: 'desc' }, t.desc, ' Weathering releases minerals that feed life nearby.'),
       h('div', { class: 'actions' }, this.action(Trash2, 'Remove rock', () => {
-        w.removeRock(rock.id);
+        this.app.cmd({ type: 'removeRock', id: rock.id });
         this.app.select(null);
       }, 'danger')),
       section('Properties', kv.root),
       section('Mineral composition', minerals),
     );
     this.updater = () => {
+      rock = w.terrain.rocks.find((r) => r.id === id) ?? rock;
       const ci = w.fields.cellIndex(rock.x, rock.y - rock.r - 8);
       const rate = CHEM.EROSION * w.params.erosion * rock.r * (1 - t.hardness) * richness(m) * 4;
       kv.set('Radius', `${rock.r.toFixed(1)} µm`);
@@ -312,13 +363,15 @@ export class Inspector implements AppModule {
 
   private buildVent(id: number) {
     const w = this.app.world;
-    const vent = w.terrain.vents.find((v) => v.id === id);
+    // look the vent up afresh each time: the simulation thread may replace these objects
+    const find = () => w.terrain.vents.find((v) => v.id === id);
+    const vent = find();
     if (!vent) return;
     this.setHead('Hydrothermal vent', `Vent #${vent.id}`, '#fb923c');
     const kv = kvGrid(['Mouth temp', 'Sulfide out', 'Minerals out', 'CO₂ out', 'Life nearby']);
     const power = h('input', { type: 'range', min: 0, max: 4, step: 0.05, value: vent.power }) as HTMLInputElement;
     const pv = h('span', { class: 'slider-val' });
-    power.addEventListener('input', () => (vent.power = Number(power.value)));
+    power.addEventListener('input', () => this.app.cmd({ type: 'ventPower', id, power: Number(power.value) }));
     this.body.append(
       h(
         'p',
@@ -328,11 +381,14 @@ export class Inspector implements AppModule {
       section('Power', h('label', { class: 'slider' }, h('div', { class: 'slider-top' }, h('span', {}, 'Vent power'), pv), power)),
       section('Output', kv.root),
       h('div', { class: 'actions' }, this.action(Trash2, 'Seal vent', () => {
-        w.removeVent(vent.id);
+        this.app.cmd({ type: 'removeVent', id });
         this.app.select(null);
       }, 'danger')),
     );
     this.updater = () => {
+      const vent = find();
+      if (!vent) return;
+      if (document.activeElement !== power) power.value = String(vent.power);
       const pw = vent.power * w.params.vents;
       const ci = w.fields.cellIndex(vent.x, vent.y - 12);
       pv.textContent = `${vent.power.toFixed(2)}×`;
@@ -349,7 +405,7 @@ export class Inspector implements AppModule {
   private buildWater(x: number, y: number) {
     const w = this.app.world;
     this.setHead('Seawater', `at x ${x.toFixed(0)} µm, depth ${y.toFixed(0)} µm`, '#38bdf8');
-    const kv = kvGrid(['Temperature', 'Oxygen', 'CO₂', 'Nutrients', 'Sulfide', 'Sunlight', 'Current', 'Life nearby', 'Detritus']);
+    const kv = kvGrid(['Temperature', 'Oxygen', 'CO₂', 'Nutrients', 'Sulfide', 'Sunlight', 'Current', 'Pheromone A', 'Pheromone B', 'Life nearby', 'Detritus']);
     const note = h('p', { class: 'desc' });
     this.body.append(section('Water chemistry', kv.root), note);
     this.updater = () => {
@@ -365,6 +421,8 @@ export class Inspector implements AppModule {
       kv.set('Sulfide', F.sulf[ci].toFixed(2));
       kv.set('Sunlight', w.sunNow > 0.01 ? pct(F.light[ci] / w.sunNow) + ' of surface' : 'night');
       kv.set('Current', speed < 0.3 ? 'still' : `${speed.toFixed(1)} µm/s ${dirName(F.su, F.sv)}`);
+      kv.set('Pheromone A', F.sigA[ci] < 0.005 ? 'none' : F.sigA[ci].toFixed(3));
+      kv.set('Pheromone B', F.sigB[ci] < 0.005 ? 'none' : F.sigB[ci].toFixed(3));
       let n = 0;
       for (const o of w.orgs) if (Math.hypot(o.x - x, o.y - y) < 80) n++;
       let p = 0;
@@ -377,6 +435,7 @@ export class Inspector implements AppModule {
       if (F.sulf[ci] > 0.6) hints.push('Sulfide is toxic here to cells without chemosynthesis.');
       if (F.temp[ci] > 35) hints.push('Hot water from a vent.');
       if (F.nut[ci] < 0.05) hints.push('Nutrient-poor: growth is limited.');
+      if (F.sigA[ci] + F.sigB[ci] > 0.05) hints.push('Cells nearby are signalling: their pheromones drift with the current.');
       note.textContent = hints.join(' ');
     };
   }

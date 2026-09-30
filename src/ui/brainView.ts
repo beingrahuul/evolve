@@ -2,7 +2,7 @@ import { INPUT_NAMES, NI, NO, OUTPUT_NAMES } from '../sim/genome';
 import type { Organism } from '../sim/organism';
 
 const W = 316;
-const H = 410;
+const H = 452;
 
 /** Live drawing of an organism's neural network: node colour = activation, edge colour = weight sign. */
 export class BrainView {
@@ -60,19 +60,24 @@ export class BrainView {
     const pos = this.pos;
     ctx.clearRect(0, 0, W, H);
 
-    // edges
+    // edges (plastic synapses are dashed; what they have learned shows in gold)
     for (let e = 0; e < b.edgeSrc.length; e++) {
       const s = b.edgeSrc[e];
       const d = b.edgeDst[e];
-      const w = b.edgeW[e];
+      const w = b.edgeWeight(e);
+      const plastic = b.isPlastic(e);
       const x1 = pos[s * 2];
       const y1 = pos[s * 2 + 1];
       const x2 = pos[d * 2];
       const y2 = pos[d * 2 + 1];
       const act = Math.min(1, Math.abs(v[s]));
       const alpha = Math.min(1, Math.abs(w) / 3) * (0.15 + 0.85 * act);
-      ctx.strokeStyle = w > 0 ? `rgba(94, 234, 212, ${alpha})` : `rgba(251, 113, 133, ${alpha})`;
+      const learned = plastic ? Math.min(1, Math.abs(b.edgeLearned(e)) * 1.5) : 0;
+      const base = w > 0 ? [94, 234, 212] : [251, 113, 133];
+      const col = base.map((c, i) => Math.round(c + ([250, 204, 21][i] - c) * learned));
+      ctx.strokeStyle = `rgba(${col[0]}, ${col[1]}, ${col[2]}, ${Math.max(alpha, learned * 0.8)})`;
       ctx.lineWidth = 0.6 + Math.min(2.5, Math.abs(w) * 0.5);
+      ctx.setLineDash(plastic ? [3, 2] : []);
       ctx.beginPath();
       ctx.moveTo(x1, y1);
       if (x2 > x1 + 4) {
@@ -85,6 +90,7 @@ export class BrainView {
       }
       ctx.stroke();
     }
+    ctx.setLineDash([]);
 
     // nodes
     ctx.font = '10px ui-monospace, SFMono-Regular, Menlo, monospace';

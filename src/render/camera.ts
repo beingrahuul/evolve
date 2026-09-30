@@ -1,38 +1,35 @@
 import { SKY_H, WORLD_H, WORLD_W } from '../sim/params';
 
-/** 2D camera. `zoom` is CSS pixels per world unit. */
+/**
+ * 2D camera. `zoom` is CSS pixels per world unit. The world always fills the view: you cannot
+ * zoom out past the point where it would leave empty margins, nor pan beyond its edges.
+ */
 export class Camera {
   x = WORLD_W / 2;
   y = WORLD_H / 2;
   zoom = 1;
   viewW = 1;
   viewH = 1;
-  fitZoom = 1;
-
-  /** Screen area not covered by UI panels: [left, top, right, bottom] insets in CSS px. */
-  insets: [number, number, number, number] = [0, 0, 0, 0];
+  /** The furthest out the camera can zoom: the world just covers the view. */
+  minZoom = 1;
 
   setViewport(w: number, h: number) {
-    const first = this.viewW === 1;
+    // a canvas not laid out yet (e.g. in a hidden tab) has no size: wait for a real one
+    if (w < 2 || h < 2) return;
+    const first = this.viewW <= 1;
     this.viewW = w;
     this.viewH = h;
-    this.fitZoom = Math.min(w / (WORLD_W * 1.02), h / ((WORLD_H + SKY_H) * 1.02));
+    this.minZoom = Math.max(w / WORLD_W, h / (WORLD_H + SKY_H));
     if (first) this.fit();
-    this.clamp();
+    else this.clamp();
   }
 
-  /** Frame the world's width inside the area left free by the UI panels, from the sky down. */
+  /** Show as much of the world as fits: zoomed out fully, from high in the sky down into the sea. */
   fit() {
-    const [l, t, r, b] = this.insets;
-    const fw = Math.max(200, this.viewW - l - r);
-    const fh = Math.max(200, this.viewH - t - b);
-    const top = -SKY_H * 0.72;
-    this.zoom = Math.max(this.fitZoom * 0.75, Math.min(fw / (WORLD_W * 1.02), fh / ((WORLD_H - top) * 0.62)));
-    const visH = fh / this.zoom;
-    const cxWorld = WORLD_W / 2;
-    const cyWorld = Math.min(top + visH / 2, (top + WORLD_H) / 2);
-    this.x = cxWorld - (l + fw / 2 - this.viewW / 2) / this.zoom;
-    this.y = cyWorld - (t + fh / 2 - this.viewH / 2) / this.zoom;
+    this.zoom = this.minZoom;
+    this.x = WORLD_W / 2;
+    this.y = -SKY_H * 0.6 + this.viewH / 2 / this.zoom;
+    this.clamp();
   }
 
   screenToWorld(sx: number, sy: number): [number, number] {
@@ -59,13 +56,13 @@ export class Camera {
     this.clamp();
   }
 
+  /** Keep the view inside the world. */
   clamp() {
-    this.zoom = Math.max(this.fitZoom * 0.75, Math.min(16, this.zoom));
-    // allow some slack beyond the world edges so panels never trap a corner
-    const sx = this.viewW / 3 / this.zoom;
-    const sy = this.viewH / 3 / this.zoom;
-    this.x = Math.max(-sx * 0.5, Math.min(WORLD_W + sx * 0.5, this.x));
-    this.y = Math.max(-SKY_H, Math.min(WORLD_H + sy * 0.5, this.y));
+    this.zoom = Math.max(this.minZoom, Math.min(16, this.zoom));
+    const hw = this.viewW / 2 / this.zoom;
+    const hh = this.viewH / 2 / this.zoom;
+    this.x = Math.max(hw, Math.min(WORLD_W - hw, this.x));
+    this.y = Math.max(-SKY_H + hh, Math.min(WORLD_H - hh, this.y));
   }
 
   /** Visible world rectangle. */

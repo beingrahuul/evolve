@@ -67,31 +67,22 @@ export class Input {
     }
     this.dragging = true;
     p.down = true;
-    const w = app.world;
     switch (app.tool) {
-      case 'spawn': {
-        const o = w.spawn(app.spawnArch, p.wx, p.wy);
-        if (o) app.selectOrganism(o);
+      case 'spawn':
+        app.cmd({ type: 'spawn', arch: app.spawnArch, x: p.wx, y: p.wy, select: true });
         break;
-      }
       case 'lightning':
-        w.callLightning(p.wx);
+        app.cmd({ type: 'lightning', x: p.wx });
         break;
       case 'rock':
-        if (p.wy > w.seaLevel - 420) {
-          w.placeRock(p.wx, p.wy, app.rockSize, app.rockType);
-          w.log('You raised a new rock from the depths.', 'god');
-        }
+        if (p.wy > app.world.seaLevel - 420) app.cmd({ type: 'rock', x: p.wx, y: p.wy, r: app.rockSize, rockType: app.rockType });
         break;
       case 'vent':
-        w.placeVent(p.wx);
-        w.log('A new hydrothermal vent cracks open on the seafloor.', 'god');
+        app.cmd({ type: 'vent', x: p.wx });
         break;
-      case 'smite': {
-        const n = w.smite(p.wx, p.wy, app.brush);
-        if (n) w.log(`You struck down ${n} organism${n > 1 ? 's' : ''}.`, 'god');
+      case 'smite':
+        app.cmd({ type: 'smite', x: p.wx, y: p.wy, r: app.brush, announce: true });
         break;
-      }
     }
   }
 
@@ -112,7 +103,7 @@ export class Input {
     }
     if (this.dragging && this.app.tool === 'current') {
       const k = 0.9;
-      this.app.world.pushFlow(p.wx, p.wy, (p.wx - this.lastWX) * k, (p.wy - this.lastWY) * k, this.app.brush);
+      this.app.cmd({ type: 'flow', x: p.wx, y: p.wy, dx: (p.wx - this.lastWX) * k, dy: (p.wy - this.lastWY) * k, r: this.app.brush });
     }
     this.lastWX = p.wx;
     this.lastWY = p.wy;
@@ -145,14 +136,15 @@ export class Input {
     const app = this.app;
     const p = app.pointer;
     if (!this.dragging || !p.down) return;
-    const w = app.world;
+    const { wx: x, wy: y } = p;
+    const r = app.brush;
     const field = FIELD_TOOLS[app.tool];
-    if (field) w.paintField(field, p.wx, p.wy, app.brush, dt);
-    else if (app.tool === 'food') w.addFood(p.wx, p.wy, app.brush, Math.max(1, Math.round(app.brush * app.brush * 0.0004)));
-    else if (app.tool === 'smite') w.smite(p.wx, p.wy, app.brush);
-    else if (app.tool === 'rain') w.seedClouds(p.wx, p.wy, app.brush, dt);
-    else if (app.tool === 'raise') w.terraform(p.wx, app.brush, -70 * dt);
-    else if (app.tool === 'lower') w.terraform(p.wx, app.brush, 70 * dt);
+    if (field) app.cmd({ type: 'paint', brush: field, x, y, r, dt });
+    else if (app.tool === 'food') app.cmd({ type: 'food', x, y, r, count: Math.max(1, Math.round(r * r * 0.0004)) });
+    else if (app.tool === 'smite') app.cmd({ type: 'smite', x, y, r, announce: false });
+    else if (app.tool === 'rain') app.cmd({ type: 'clouds', x, y, r, dt });
+    else if (app.tool === 'raise') app.cmd({ type: 'terraform', x, r, amount: -70 * dt });
+    else if (app.tool === 'lower') app.cmd({ type: 'terraform', x, r, amount: 70 * dt });
   }
 
   private key(e: KeyboardEvent) {
@@ -213,6 +205,9 @@ export class Input {
         break;
       case 't':
         this.onTree();
+        break;
+      case 'm':
+        this.god.toggleCollapsed();
         break;
       case 'escape':
         if (app.selection) app.select(null);

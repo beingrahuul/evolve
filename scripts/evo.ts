@@ -1,10 +1,10 @@
 // Long-run evolution check: prints population, diversity and trait/brain drift.
-// Usage: npx tsx scripts/evo.ts [seconds=3600] [seed=42]
-import { World } from '../src/sim/world';
+// Usage: npx tsx scripts/evo.ts [seconds=3600] [seed=42] [width=1920]
+import { makeWorld } from '../src/sim/world';
 import { A } from '../src/sim/genome';
 import { TPS } from '../src/sim/params';
 const seconds = Number(process.argv[2] ?? 3600);
-const w = new World(Number(process.argv[3] ?? 42));
+const w = makeWorld(Number(process.argv[3] ?? 42), undefined, Number(process.argv[4] ?? 1920));
 const t0 = performance.now();
 for (let s = 1; s <= seconds * TPS; s++) {
   w.step();

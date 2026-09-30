@@ -1,18 +1,24 @@
 import './style.css';
 import { X } from 'lucide';
 import { App } from './app';
+import { WORLD_SIZES, WorldSize } from './sim/params';
 import { Renderer } from './render/renderer';
 import { Dock } from './ui/dock';
 import { h, icon } from './ui/dom';
 import { GodPanel, TOOL_DEFS } from './ui/godPanel';
 import { Input } from './ui/input';
 import { Inspector } from './ui/inspector';
+import { Notifications } from './ui/notifications';
 import { TopBar } from './ui/topbar';
-import { Toasts } from './ui/toasts';
 import { TreeView } from './ui/treeView';
 
+// Layout: a sidebar of tools on the left; on the right a header bar, the world, and the history dock.
 const root = document.getElementById('app')!;
 const canvas = document.getElementById('world') as HTMLCanvasElement;
+const stage = h('main', { id: 'stage' });
+stage.append(canvas);
+const column = h('div', { id: 'main' });
+root.append(column);
 
 function fatal(msg: string) {
   root.append(h('div', { class: 'fatal panel' }, h('h2', {}, 'Primordial could not start'), h('p', {}, msg)));
@@ -28,16 +34,22 @@ try {
 
 const params = new URLSearchParams(location.search);
 const seed = Number(params.get('seed')) || Math.floor(Math.random() * 1e6);
-const app = new App(renderer, seed);
+const size = params.get('size') as WorldSize | null;
+const app = new App(renderer, seed, WORLD_SIZES[size && size in WORLD_SIZES ? size : 'wide'].width);
 
-const top = new TopBar(app);
+const toggleHelp = () => help.classList.toggle('hidden');
+const notifications = new Notifications(app);
+const helpBtn = h('button', { class: 'btn icon-btn help-btn', title: 'Help (?)', onclick: () => toggleHelp() }, '?');
+const top = new TopBar(app, [notifications.button, helpBtn]);
 const god = new GodPanel(app);
 const inspector = new Inspector(app);
 const tree = new TreeView(app);
 const dock = new Dock(app, () => tree.open());
-const toasts = new Toasts(app);
-app.modules.push(top, god, inspector, dock, toasts, tree);
-root.append(top.root, god.root, inspector.root, dock.root, toasts.root, tree.root);
+app.modules.push(top, god, inspector, dock, notifications, tree);
+root.prepend(god.root);
+column.append(top.root, stage, dock.root);
+stage.append(inspector.root, notifications.panel);
+root.append(tree.root);
 
 // ---- help / welcome --------------------------------------------------------
 const help = h(
@@ -61,7 +73,12 @@ const help = h(
     h(
       'p',
       {},
-      'You are god. Change the laws of nature, reshape the seabed, or strike with meteors, and watch life adapt. Click anything to inspect it, including a cell (and its brain and body plan), a rock, a vent, the water or the sky. Save your world to a file at any time.',
+      'Lineages with a sex drive court a mate when they are ready to breed (a rose-coloured pulse) and their young mix both parents\' genes; plants cross-pollinate on the wind. Brains with plastic synapses learn during their lives from reward, and cells can talk: two pheromones drift through the water, and what they come to mean (alarm, a mating call) is up to evolution.',
+    ),
+    h(
+      'p',
+      {},
+      'You are god. Change the laws of nature, reshape the seabed, or strike with meteors, and watch life adapt. Click anything to inspect it, including a cell (and its brain and body plan), a rock, a vent, the water or the sky. Save your world to a file at any time. Bigger worlds are in the World panel.',
     ),
     h(
       'div',
@@ -73,9 +90,10 @@ const help = h(
         ['+ / −', 'Change speed'],
         ['.', 'Step one tick'],
         ['F', 'Follow selected cell'],
-        ['H', 'Show whole world'],
+        ['H', 'Zoom out fully'],
         ['O', 'Cycle overlays'],
         ['T', 'Tree of life'],
+        ['M', 'Minimise sidebar'],
         ['[ / ]', 'Brush size'],
         ['Esc', 'Deselect'],
         ...TOOL_DEFS.map((t) => [t.key.toUpperCase(), t.label]),
@@ -85,8 +103,6 @@ const help = h(
   ),
 );
 root.append(help);
-const toggleHelp = () => help.classList.toggle('hidden');
-root.append(h('button', { id: 'helpBtn', class: 'btn panel', title: 'Help (?)', onclick: toggleHelp }, '?'));
 try {
   if (!localStorage.getItem('primordial.welcomed')) {
     help.classList.remove('hidden');
@@ -103,10 +119,6 @@ function resize() {
   const r = canvas.getBoundingClientRect();
   // the world canvas renders at up to 1.5× device pixels; UI text stays crisp in the DOM
   const dpr = Math.min(1.5, window.devicePixelRatio || 1);
-  const g = god.root.getBoundingClientRect();
-  const t = top.root.getBoundingClientRect();
-  const d = dock.root.getBoundingClientRect();
-  app.camera.insets = [g.width ? g.right + 6 : 0, t.bottom + 4, 8, d.height ? r.height - d.top + 6 : 0];
   renderer.resize(r.width, r.height, dpr);
   app.camera.setViewport(r.width, r.height);
 }
@@ -114,6 +126,8 @@ new ResizeObserver(resize).observe(canvas);
 resize();
 
 // ---- main loop ------------------------------------------------------------------
+const loading = h('div', { class: 'loading panel' }, h('span', { class: 'spinner' }), 'Creating a world…');
+stage.append(loading);
 let last = performance.now();
 let frame = 0;
 const brushTools = new Set(TOOL_DEFS.filter((t) => t.brush).map((t) => t.id));
@@ -123,6 +137,12 @@ function loop(now: number) {
   last = now;
   app.fps = app.fps * 0.95 + (1 / dt) * 0.05;
 
+  if (!app.ready) {
+    app.simulate(dt);
+    requestAnimationFrame(loop);
+    return;
+  }
+  loading.remove();
   input.apply(dt);
   app.simulate(dt);
 
