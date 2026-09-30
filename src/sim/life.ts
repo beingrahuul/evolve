@@ -1,5 +1,5 @@
 import { qsat } from './atmosphere';
-import { A, CT, IN, OUT, mutate, signatureKin } from './genome';
+import { A, CT, IN, OUT, crossover, genomeDistance, mutate, signatureKin } from './genome';
 import { MAXC, Organism } from './organism';
 import { BIO, CHEM, DT, MAX_ORGS, SKY_H, WORLD_H, WORLD_W } from './params';
 import type { World } from './world';
@@ -125,7 +125,11 @@ function updateOrganism(w: World, o: Organism, idx: number, births: Organism[]) 
   let kdx = 0;
   let kdy = 0;
   let kd = 1;
+  let kinQ: Organism | null = null;
   let touching = 0;
+  // a courting organism looks for a courting partner close enough to exchange gametes with
+  const courting = o.courting > 0;
+  let mate: Organism | null = null;
   {
     const cx0 = G.cellX(o.x - range);
     const cx1 = G.cellX(o.x + range);
@@ -146,6 +150,9 @@ function updateOrganism(w: World, o: Organism, idx: number, births: Organism[]) 
           if (d2 > reach * reach) continue;
           const d = Math.sqrt(d2) + 1e-6;
           const gap = d - o.radius - q.radius;
+          if (courting && mate === null && q.courting > 0 && gap < BIO.MATE_GAP && genomeDistance(g, q.genome) < BIO.MATE_DIST) {
+            mate = q;
+          }
           if (gap < 0.8) {
             touching++;
             // innate kin recognition: close relatives are spared unless starving
@@ -183,6 +190,7 @@ function updateOrganism(w: World, o: Organism, idx: number, births: Organism[]) 
                 kdx = dx;
                 kdy = dy;
                 kd = d;
+                kinQ = q;
               }
             } else if (gap < bestGap) {
               bestGap = gap;
@@ -315,14 +323,20 @@ function updateOrganism(w: World, o: Organism, idx: number, births: Organism[]) 
     inp[IN.CellGlow] = 0;
     inp[IN.CellGreen] = 0;
   }
-  if (kinGap < 1e8) {
+  if (kinQ) {
     const prox = 1 - Math.max(0, Math.min(1, kinGap / range));
     inp[IN.KinFwd] = ((kdx * hx + kdy * hy) / kd) * prox;
     inp[IN.KinSide] = ((-kdx * hy + kdy * hx) / kd) * prox;
+    inp[IN.KinGlow] = kinQ.glow;
+    // a courting relative is visible (a courtship display)
+    inp[IN.MateNear] = kinQ.courting > 0 ? prox : 0;
   } else {
     inp[IN.KinFwd] = 0;
     inp[IN.KinSide] = 0;
+    inp[IN.KinGlow] = 0;
+    inp[IN.MateNear] = 0;
   }
+  inp[IN.Ready] = courting ? 1 : 0;
   inp[IN.Pain] = o.pain;
   // chemotaxis: compare the water just ahead with just behind (sharper with sense organs)
   {
@@ -335,6 +349,11 @@ function updateOrganism(w: World, o: Organism, idx: number, births: Organism[]) 
       inp[IN.LightGrad] = clamp1(((F.light[ia] - F.light[ib]) / (L + 0.05)) * 2) * acuity;
       inp[IN.NutGrad] = clamp1(((F.nut[ia] - F.nut[ib]) / (NU + 0.02)) * 2) * acuity;
       inp[IN.SulfGrad] = Math.tanh((F.sulf[ia] - F.sulf[ib]) * 0.8) * acuity;
+      // pheromones: how strong, and stronger ahead or behind?
+      inp[IN.SigA] = Math.tanh(F.sigA[ci] * 2);
+      inp[IN.SigB] = Math.tanh(F.sigB[ci] * 2);
+      inp[IN.SigAGrad] = Math.tanh((F.sigA[ia] - F.sigA[ib]) * 4) * acuity;
+      inp[IN.SigBGrad] = Math.tanh((F.sigB[ia] - F.sigB[ib]) * 4) * acuity;
     } else {
       // on land: soil richness ahead vs behind, and which way is uphill (towards the sea is downhill)
       const d = hx >= 0 ? 2 : -2;
@@ -343,6 +362,10 @@ function updateOrganism(w: World, o: Organism, idx: number, births: Organism[]) 
       inp[IN.LightGrad] = 0;
       inp[IN.NutGrad] = clamp1(((na - nb) / (NU + 0.05)) * 2) * acuity;
       inp[IN.SulfGrad] = 0;
+      inp[IN.SigA] = 0;
+      inp[IN.SigB] = 0;
+      inp[IN.SigAGrad] = 0;
+      inp[IN.SigBGrad] = 0;
     }
   }
   inp[IN.InWater] = wet ? 1 : 0;
@@ -356,9 +379,29 @@ function updateOrganism(w: World, o: Organism, idx: number, births: Organism[]) 
   o.eating = o.brain.output(OUT.Eat) > 0 && o.nMouths > 0;
   const floatTarget = (o.brain.output(OUT.Float) + 1) * 0.5;
   o.glow = Math.max(0, o.brain.output(OUT.Glow));
+  o.emitA = Math.max(0, o.brain.output(OUT.EmitA));
+  o.emitB = Math.max(0, o.brain.output(OUT.EmitB));
+  const pw = w.params;
+  // pheromones are released into the water around the cell
+  if (wet && pw.pheromones > 0.01 && o.emitA + o.emitB > 0) {
+    F.sigA[ci] += BIO.SIG_EMIT * o.emitA * DT;
+    F.sigB[ci] += BIO.SIG_EMIT * o.emitB * DT;
+  }
+
+  // ---- learning: reward = food intake better (or worse) than expected, minus pain ----
+  {
+    const total = o.eLight + o.eChem + o.eFood + o.ePrey;
+    const gain = (total - o.intakeMark) / (o.mass * DT);
+    o.intakeMark = total;
+    o.gainFast += (gain - o.gainFast) * Math.min(1, DT / 0.5);
+    o.gainSlow += (gain - o.gainSlow) * (DT / 10);
+    const surprise = (o.gainFast - o.gainSlow) / (Math.abs(o.gainSlow) + 0.02);
+    const r = Math.tanh(0.5 * surprise) - o.pain;
+    o.reward = r > 1 ? 1 : r < -1 ? -1 : r;
+    if (g.learn > 0 && pw.learning > 0) o.brain.learn(o.reward, g.learn * pw.learning, DT);
+  }
 
   // ---- metabolism ----------------------------------------------------------
-  const pw = w.params;
   const tempRate = Math.min(2, Math.max(0.5, Math.exp(0.0693147 * (T - 20)))); // Q10 = 2
   const dev = (T - g.tempOpt) / g.tempTol;
   const enzyme = Math.exp(-0.5 * dev * dev);
@@ -367,6 +410,7 @@ function updateOrganism(w: World, o: Organism, idx: number, births: Organism[]) 
   upkeep += BIO.THRUST_COST * drive * drive * o.mass;
   if (o.eating) upkeep += BIO.MOUTH_OPEN_COST * o.mass;
   upkeep += BIO.GLOW_COST * o.glow * o.mass;
+  upkeep += BIO.SIG_COST * (o.emitA + o.emitB) * o.mass;
   const aer = O2 / (O2 + 1.5);
   const burn = upkeep * (2 - aer) * DT; // fermentation (no O₂) is half as efficient
   o.energy -= burn;
@@ -497,6 +541,7 @@ function updateOrganism(w: World, o: Organism, idx: number, births: Organism[]) 
   }
   o.pain *= 1 - 2 * DT;
   o.age += DT;
+  o.sinceMating += DT;
 
   if (o.energy <= 0 && o.health > 0) {
     // catabolism: burn body mass to survive a little longer
@@ -521,9 +566,26 @@ function updateOrganism(w: World, o: Organism, idx: number, births: Organism[]) 
     return;
   }
 
-  // reproduction
-  if (o.mass >= g.divMass && o.energy > 0.5 * o.ecap && w.orgs.length + births.length < MAX_ORGS) {
-    reproduce(w, o, births);
+  // ---- reproduction: divide alone, or court a mate first --------------------
+  if (o.mass < g.divMass || o.energy <= 0.5 * o.ecap || w.orgs.length + births.length >= MAX_ORGS) o.courting = 0;
+  else {
+    // rooted land plants cannot touch: pollen carries on the wind to a flowering neighbour
+    if (courting && !mate && !wet && isRooted(o) && w.rng.chance(0.1)) mate = findPollinator(w, o, idx);
+    if (mate && !mate.dead) {
+      reproduce(w, o, births, mate);
+      // the partner is fertilised too (both were ready); otherwise it just spends its gametes
+      const q = mate;
+      if (q.mass >= q.genome.divMass && q.energy > 0.5 * q.ecap && w.orgs.length + births.length < MAX_ORGS) {
+        reproduce(w, q, births, o);
+      } else {
+        const c = BIO.GAMETE_COST * q.mass;
+        q.energy -= c;
+        release(w, q, F.cellIndex(q.x, q.y), c);
+        q.sinceMating = 0;
+      }
+      w.onMating(o, q);
+    } else if (g.sex > 0.01 && o.courting < g.sex * BIO.MATE_WAIT) o.courting += DT;
+    else reproduce(w, o, births, null);
   }
 
   // ---- motion (velocity; position is integrated after collisions) ---------
@@ -550,10 +612,45 @@ function updateOrganism(w: World, o: Organism, idx: number, births: Organism[]) 
   else if (o.heading < -Math.PI) o.heading += TWO_PI;
 }
 
+/** Anchored in the ground by roots (a rooting cuticle or root cells). */
+function isRooted(o: Organism): boolean {
+  return o.frac[A.root] > 0.12 || o.genome.body.some((c) => c.type === CT.Root);
+}
+
+/** A courting land plant within pollen range (further downwind), able to interbreed with o. */
+function findPollinator(w: World, o: Organism, idx: number): Organism | null {
+  const G = w.orgGrid;
+  const wind = w.atmosphere.surfaceWind(o.x);
+  const reach = BIO.POLLEN_RANGE + Math.abs(wind) * 3;
+  let best: Organism | null = null;
+  let bd = reach;
+  const cx0 = G.cellX(o.x - reach);
+  const cx1 = G.cellX(o.x + reach);
+  const cy0 = G.cellY(o.y - reach);
+  const cy1 = G.cellY(o.y + reach);
+  for (let cy = cy0; cy <= cy1; cy++) {
+    for (let cx = cx0; cx <= cx1; cx++) {
+      const c = cy * G.cols + cx;
+      for (let k = G.start[c]; k < G.start[c + 1]; k++) {
+        const j = G.items[k];
+        if (j === idx) continue;
+        const q = w.orgs[j];
+        if (q.dead || q.courting <= 0 || !q.onLand) continue;
+        const d = Math.hypot(q.x - o.x, q.y - o.y);
+        if (d < bd && genomeDistance(o.genome, q.genome) < BIO.MATE_DIST) {
+          bd = d;
+          best = q;
+        }
+      }
+    }
+  }
+  return best;
+}
+
 /** Movement out of the water: fall, rest on the ground, crawl; rooted plants grow towards the light. */
 function landMotion(w: World, o: Organism, drive: number, floatTarget: number) {
   const fr = o.frac;
-  const rooted = fr[A.root] > 0.12 || o.genome.body.some((c) => c.type === CT.Root);
+  const rooted = isRooted(o);
   o.inflate += (floatTarget - o.inflate) * Math.min(1, DT * 0.8);
   if (rooted) {
     // phototropism: the growing tip turns up
@@ -640,14 +737,18 @@ function tryBite(w: World, o: Organism, q: Organism, mouth: number, ci: number) 
   }
 }
 
-/** Single cells split in two; multicellular bodies bud off a small propagule that grows its own body. */
-function reproduce(w: World, o: Organism, births: Organism[]) {
+/**
+ * Single cells split in two; multicellular bodies bud off a small propagule that grows its own body.
+ * With a mate, the offspring's genome recombines both parents' genes (then mutates as usual).
+ */
+function reproduce(w: World, o: Organism, births: Organism[], mate: Organism | null) {
   const rng = w.rng;
   const F = w.fields;
   const cost = 0.04 * o.mass;
   o.energy -= cost;
   release(w, o, F.cellIndex(o.x, o.y), cost);
-  const g2 = mutate(o.genome, rng, w.params.mutation);
+  o.courting = 0;
+  const g2 = mutate(mate ? crossover(o.genome, mate.genome, rng) : o.genome, rng, w.params.mutation);
   const sp = w.species.assign(g2, o.species, w.tick, rng);
   const share = o.genome.body.length > 0 ? 0.3 : 0.5;
   const m = o.mass * share;
@@ -684,6 +785,12 @@ function reproduce(w: World, o: Organism, births: Organism[]) {
   child.inflate = o.inflate;
   child.updateWorldCells();
   o.children++;
+  if (mate) {
+    child.father = mate.id;
+    o.mates++;
+    o.sinceMating = 0;
+  }
+  w.recordBirth(mate !== null);
   births.push(child);
 }
 

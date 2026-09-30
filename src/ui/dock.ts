@@ -3,7 +3,7 @@ import { App, AppModule } from '../app';
 import { TPS } from '../sim/params';
 import { h, icon } from './dom';
 
-type Mode = 'species' | 'roles' | 'atmosphere';
+type Mode = 'species' | 'roles' | 'atmosphere' | 'evolution';
 
 const ROLE_COLORS = { photo: '#4ade80', chemo: '#fb923c', hetero: '#f87171', land: '#c08a57' };
 
@@ -31,6 +31,7 @@ export class Dock implements AppModule {
         ['species', 'Species'],
         ['roles', 'Lifestyles'],
         ['atmosphere', 'Atmosphere'],
+        ['evolution', 'Behaviour'],
       ] as [Mode, string][]
     ).forEach(([m, label]) => {
       const b = h('button', { class: 'seg-btn', onclick: () => this.setMode(m) }, label);
@@ -123,28 +124,51 @@ export class Dock implements AppModule {
     const x = (i: number) => (i / (n - 1)) * W;
     const legendItems: [string, string][] = [];
 
-    if (this.mode === 'atmosphere') {
-      const series: [string, string, (s: (typeof samples)[number]) => number][] = [
-        ['O₂', '#7dd3fc', (s) => s.atmO2],
-        ['CO₂', '#fbbf24', (s) => s.atmCO2],
-        ['Water °C', '#f472b6', (s) => s.meanTemp / 30],
-        ['Cloud %', '#cbd5e1', (s) => s.cloud ?? 0],
-      ];
+    if (this.mode === 'atmosphere' || this.mode === 'evolution') {
+      const evo = this.mode === 'evolution';
+      // births come in bursts (by day, when a lineage is ready): average the sexual share over half a minute
+      const smooth = (i: number) => {
+        let b = 0;
+        let sx = 0;
+        for (let k = Math.max(0, i - 29); k <= i; k++) {
+          b += samples[k].births ?? 0;
+          sx += (samples[k].births ?? 0) * (samples[k].sexual ?? 0);
+        }
+        return b ? sx / b : 0;
+      };
+      const series: [string, string, (s: (typeof samples)[number], i: number) => number][] = evo
+        ? [
+            ['Sexual births', '#fb7185', (_s, i) => smooth(i)],
+            ['Sex drive', '#f9a8d4', (s) => s.sexDrive ?? 0],
+            ['Learners', '#facc15', (s) => s.learners ?? 0],
+            ['Signalling', '#a78bfa', (s) => s.signalers ?? 0],
+          ]
+        : [
+            ['O₂', '#7dd3fc', (s) => s.atmO2],
+            ['CO₂', '#fbbf24', (s) => s.atmCO2],
+            ['Water °C', '#f472b6', (s) => s.meanTemp / 30],
+            ['Cloud %', '#cbd5e1', (s) => s.cloud ?? 0],
+          ];
       let max = 0;
-      for (const s of samples) for (const [, , f] of series) max = Math.max(max, f(s));
-      max = max * 1.1 || 1;
+      samples.forEach((s, i) => {
+        for (const [, , f] of series) max = Math.max(max, f(s, i));
+      });
+      max = evo ? Math.max(0.2, max * 1.1) : max * 1.1 || 1;
       for (const [name, col, f] of series) {
         ctx.strokeStyle = col;
         ctx.lineWidth = 1.6;
         ctx.beginPath();
         samples.forEach((s, i) => {
-          const y = H - (f(s) / max) * H;
+          const y = H - (f(s, i) / max) * H;
           if (i === 0) ctx.moveTo(x(i), y);
           else ctx.lineTo(x(i), y);
         });
         ctx.stroke();
-        const last = f(samples[n - 1]);
-        legendItems.push([col, `${name} ${name === 'Water °C' ? (last * 30).toFixed(1) : (last * 100).toFixed(1)}`]);
+        const last = f(samples[n - 1], n - 1);
+        legendItems.push([
+          col,
+          evo ? `${name} ${(last * 100).toFixed(0)}%` : `${name} ${name === 'Water °C' ? (last * 30).toFixed(1) : (last * 100).toFixed(1)}`,
+        ]);
       }
     } else {
       // stacked area

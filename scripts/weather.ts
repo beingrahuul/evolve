@@ -1,10 +1,10 @@
 // Phase 3 diagnostics: tides, weather, soil and life on land.
-// Usage: npx tsx scripts/weather.ts [seconds=600] [seed=42]
-import { World } from '../src/sim/world';
+// Usage: npx tsx scripts/weather.ts [seconds=600] [seed=42] [width=1920]
+import { makeWorld } from '../src/sim/world';
 import { A } from '../src/sim/genome';
 import { TPS } from '../src/sim/params';
 const seconds = Number(process.argv[2] ?? 600);
-const w = new World(Number(process.argv[3] ?? 42));
+const w = makeWorld(Number(process.argv[3] ?? 42), undefined, Number(process.argv[4] ?? 1920));
 const t0 = performance.now();
 let last = performance.now();
 let lastTick = 0;

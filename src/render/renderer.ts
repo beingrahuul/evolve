@@ -29,11 +29,11 @@ export interface ViewState {
   brush: { x: number; y: number; r: number; visible: boolean; color: [number, number, number] } | null;
 }
 
-const CELL_FLOATS = 24;
+const CELL_FLOATS = 28;
 const ROCK_FLOATS = 8;
 const SPRITE_FLOATS = 8;
-const MAX_SPRITES = MAX_PARTICLES + MAX_ORGS + 64;
-const MAX_CELL_INSTANCES = 14000;
+const MAX_CELL_INSTANCES = 40000;
+const MAX_ROCKS = 512;
 
 interface Prog {
   p: WebGLProgram;
@@ -65,23 +65,28 @@ export class Renderer {
   private cellData = new Float32Array(MAX_CELL_INSTANCES * CELL_FLOATS);
   private rockBuf: WebGLBuffer;
   private rockVao: WebGLVertexArrayObject;
-  private rockData = new Float32Array(256 * ROCK_FLOATS);
-  private spriteBuf: WebGLBuffer;
-  private spriteVao: WebGLVertexArrayObject;
-  private spriteData = new Float32Array(MAX_SPRITES * SPRITE_FLOATS);
+  private rockData = new Float32Array(MAX_ROCKS * ROCK_FLOATS);
+  private spriteBuf!: WebGLBuffer;
+  private spriteVao!: WebGLVertexArrayObject;
+  private spriteData = new Float32Array(0);
 
-  private f0 = new Float32Array(NX * NY * 4);
-  private f1 = new Float32Array(NX * NY * 4);
-  private texF0: WebGLTexture;
-  private texF1: WebGLTexture;
-  private texFloor: WebGLTexture;
-  private texAir: WebGLTexture;
-  private texSoil: WebGLTexture;
-  private airData = new Float32Array(AIR_NX * AIR_NY * 4);
-  private soilData = new Float32Array(NSOIL * 4);
+  // sized by the world's width (see allocWorld)
+  /** Width of the world the textures below were made for. */
+  worldWidth = 0;
+  private f0 = new Float32Array(0);
+  private f1 = new Float32Array(0);
+  private f2 = new Float32Array(0);
+  private texF0!: WebGLTexture;
+  private texF1!: WebGLTexture;
+  private texF2!: WebGLTexture;
+  private texFloor!: WebGLTexture;
+  private texAir!: WebGLTexture;
+  private texSoil!: WebGLTexture;
+  private airData = new Float32Array(0);
+  private soilData = new Float32Array(0);
+  private floorData = new Float32Array(0);
   private boltData = new Float32Array(20);
   private floorVersion = -1;
-  private floorData = new Float32Array(NFLOOR);
   private floorWorld: World | null = null;
   private ventData = new Float32Array(32);
 
@@ -132,6 +137,7 @@ export class Renderer {
       ['a_al2', 4, 48],
       ['a_misc', 4, 64],
       ['a_ext', 4, 80],
+      ['a_sex', 4, 96],
     ]);
     this.rockBuf = gl.createBuffer()!;
     gl.bindBuffer(gl.ARRAY_BUFFER, this.rockBuf);
@@ -140,6 +146,19 @@ export class Renderer {
       ['a_rock', 4, 0],
       ['a_col', 4, 16],
     ]);
+    this.allocWorld();
+  }
+
+  /** (Re)create everything whose size depends on the world's width. */
+  private allocWorld() {
+    const gl = this.gl;
+    if (this.worldWidth) {
+      for (const t of [this.texF0, this.texF1, this.texF2, this.texFloor, this.texAir, this.texSoil]) gl.deleteTexture(t);
+      gl.deleteBuffer(this.spriteBuf);
+      gl.deleteVertexArray(this.spriteVao);
+    }
+    this.worldWidth = WORLD_W;
+    this.spriteData = new Float32Array((MAX_PARTICLES + MAX_ORGS + 64) * SPRITE_FLOATS);
     this.spriteBuf = gl.createBuffer()!;
     gl.bindBuffer(gl.ARRAY_BUFFER, this.spriteBuf);
     gl.bufferData(gl.ARRAY_BUFFER, this.spriteData.byteLength, gl.DYNAMIC_DRAW);
@@ -147,9 +166,16 @@ export class Renderer {
       ['a_s', 4, 0],
       ['a_c', 4, 16],
     ]);
-
+    this.f0 = new Float32Array(NX * NY * 4);
+    this.f1 = new Float32Array(NX * NY * 4);
+    this.f2 = new Float32Array(NX * NY * 4);
+    this.airData = new Float32Array(AIR_NX * AIR_NY * 4);
+    this.soilData = new Float32Array(NSOIL * 4);
+    this.floorData = new Float32Array(NFLOOR);
+    this.floorWorld = null;
     this.texF0 = dataTexture(gl, NX, NY, gl.RGBA16F, gl.RGBA, this.f0);
     this.texF1 = dataTexture(gl, NX, NY, gl.RGBA16F, gl.RGBA, this.f1);
+    this.texF2 = dataTexture(gl, NX, NY, gl.RGBA16F, gl.RGBA, this.f2);
     this.texFloor = dataTexture(gl, NFLOOR, 1, gl.R16F, gl.RED, this.floorData);
     this.texAir = dataTexture(gl, AIR_NX, AIR_NY, gl.RGBA16F, gl.RGBA, this.airData);
     this.texSoil = dataTexture(gl, NSOIL, 1, gl.RGBA16F, gl.RGBA, this.soilData);
@@ -218,6 +244,7 @@ export class Renderer {
     const F = world.fields;
     const f0 = this.f0;
     const f1 = this.f1;
+    const f2 = this.f2;
     const n = NX * NY;
     for (let i = 0; i < n; i++) {
       const k = i * 4;
@@ -229,12 +256,16 @@ export class Renderer {
       f1[k + 1] = F.v[i];
       f1[k + 2] = F.sulf[i];
       f1[k + 3] = F.light[i];
+      f2[k] = F.sigA[i];
+      f2[k + 1] = F.sigB[i];
     }
     const gl = this.gl;
     gl.bindTexture(gl.TEXTURE_2D, this.texF0);
     gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, NX, NY, gl.RGBA, gl.FLOAT, f0);
     gl.bindTexture(gl.TEXTURE_2D, this.texF1);
     gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, NX, NY, gl.RGBA, gl.FLOAT, f1);
+    gl.bindTexture(gl.TEXTURE_2D, this.texF2);
+    gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, NX, NY, gl.RGBA, gl.FLOAT, f2);
     // air: temperature, humidity, cloud water, rain (per column)
     const air = world.atmosphere;
     const ad = this.airData;
@@ -271,6 +302,7 @@ export class Renderer {
 
   render(world: World, cam: Camera, view: ViewState) {
     const gl = this.gl;
+    if (this.worldWidth !== WORLD_W) this.allocWorld();
     const zoomDev = cam.zoom * this.dpr;
     const day = smoothstep(-0.25, 0.3, world.sunElev);
     const ambient = 0.22 + 0.78 * day;
@@ -332,6 +364,9 @@ export class Renderer {
     gl.activeTexture(gl.TEXTURE4);
     gl.bindTexture(gl.TEXTURE_2D, this.texSoil);
     gl.uniform1i(bg.u.u_soil, 4);
+    gl.activeTexture(gl.TEXTURE5);
+    gl.bindTexture(gl.TEXTURE_2D, this.texF2);
+    gl.uniform1i(bg.u.u_f2, 5);
     gl.activeTexture(gl.TEXTURE0);
     gl.bindVertexArray(this.triVaoBg);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
@@ -346,7 +381,7 @@ export class Renderer {
     const rocks = world.terrain.rocks;
     let nr = 0;
     for (const r of rocks) {
-      if (nr >= 256) break;
+      if (nr >= MAX_ROCKS) break;
       const b = nr * ROCK_FLOATS;
       const d = this.rockData;
       d[b] = r.x;
@@ -408,7 +443,7 @@ export class Renderer {
       if (o.dead || o.nCells < 2) continue;
       const m = o.radius * 1.5;
       if (o.x < bx0 - m || o.x > bx1 + m || o.y < by0 - m || o.y > by1 + m) continue;
-      if (nm >= MAX_ORGS) break;
+      if (nm >= this.spriteData.length / SPRITE_FLOATS) break;
       const b = nm * SPRITE_FLOATS;
       const col = hsv(o.genome.hue, 0.45, 0.9);
       sd[b] = o.x;
@@ -478,6 +513,12 @@ export class Renderer {
         cd[b + 17] = flags + (o.eating && isMouth ? 2 : 0);
         cd[b + 18] = o.health;
         cd[b + 19] = o.inflate;
+        // courtship display, the flash of mating, pheromones being released (the core cell shows them)
+        const core = i === 0;
+        cd[b + 24] = core && o.courting > 0 ? 1 : 0;
+        cd[b + 25] = core ? Math.max(0, 1 - o.sinceMating / 1.2) : 0;
+        cd[b + 26] = core ? o.emitA : 0;
+        cd[b + 27] = core ? o.emitB : 0;
         nc++;
       }
     }

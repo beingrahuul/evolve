@@ -1,25 +1,63 @@
 // World geometry and simulation constants.
 // World units: x to the right, y downward. Water surface is y = 0, the sky is y < 0.
 
-export const WORLD_W = 1920;
 export const WORLD_H = 1080;
 export const SKY_H = 560;
 
 export const CELL = 15; // fluid / chemistry grid cell size in world units
 /** The water grid starts a little above y = 0 so high tides have room. */
 export const GRID_TOP = -45;
-export const NX = WORLD_W / CELL; // 128
 export const NY = (WORLD_H - GRID_TOP) / CELL; // 75
 
 /** Air grid (atmosphere): coarse, from the top of the sky down to just below sea level. */
 export const AIR_CELL = 40;
 export const AIR_TOP = -SKY_H;
-export const AIR_NX = WORLD_W / AIR_CELL; // 48
 export const AIR_NY = (40 - AIR_TOP) / AIR_CELL; // 15
 
 /** Soil columns on land. */
 export const SOIL_RES = 8;
-export const NSOIL = WORLD_W / SOIL_RES + 1;
+export const FLOOR_RES = 4;
+
+// ---------------------------------------------------------------------------
+// World width is chosen per world (bigger worlds are wider). Everything sized by it is derived
+// here and rebound by setWorldWidth(); a thread simulates or displays one width at a time.
+// ---------------------------------------------------------------------------
+
+export const WORLD_SIZES = {
+  standard: { width: 1920, label: 'Standard', hint: 'One coast; the classic world.' },
+  wide: { width: 3840, label: 'Wide', hint: 'Twice as wide: a continent and an island.' },
+  vast: { width: 5760, label: 'Vast', hint: 'Three times as wide: an archipelago. Needs a fast CPU.' },
+} as const;
+export type WorldSize = keyof typeof WORLD_SIZES;
+
+export let WORLD_W = 1920;
+export let NX = 128; // water columns
+export let AIR_NX = 48; // air columns
+export let NSOIL = 241; // soil columns
+export let NFLOOR = 481; // seafloor / ground height samples
+/** Population and detritus caps grow with the world. */
+export let MAX_ORGS = 3500;
+export let MAX_PARTICLES = 9000;
+
+/** Set the width of the world about to be created or displayed (a multiple of 1920 / 2). */
+export function setWorldWidth(w: number) {
+  w = Math.max(960, Math.round(w / 480) * 480);
+  WORLD_W = w;
+  NX = w / CELL;
+  AIR_NX = w / AIR_CELL;
+  NSOIL = w / SOIL_RES + 1;
+  NFLOOR = w / FLOOR_RES + 1;
+  const scale = w / 1920;
+  MAX_ORGS = Math.round(3500 * scale);
+  MAX_PARTICLES = Math.round(9000 * scale);
+  // a wider world has a bigger sky above it
+  CHEM.ATM_CELLS = 60000 * scale;
+}
+
+export function worldSizeOf(width: number): WorldSize {
+  for (const [k, v] of Object.entries(WORLD_SIZES)) if (v.width === width) return k as WorldSize;
+  return 'standard';
+}
 
 /** Largest tidal swing (world units) at tides = 1. */
 export const TIDE_AMP = 26;
@@ -27,12 +65,6 @@ export const TIDE_AMP = 26;
 export const TPS = 60; // simulation ticks per simulated second
 export const DT = 1 / TPS;
 export const FIELD_EVERY = 3; // fluid + chemistry update every N ticks
-
-export const MAX_ORGS = 3500;
-export const MAX_PARTICLES = 9000;
-
-export const FLOOR_RES = 4;
-export const NFLOOR = WORLD_W / FLOOR_RES + 1;
 
 /** The laws of the world that the player (god) can change at runtime. */
 export interface GodParams {
@@ -49,6 +81,8 @@ export interface GodParams {
   tides: number; // tidal range multiplier
   humidity: number; // evaporation multiplier: how wet the climate is
   storms: number; // convective instability: how stormy the weather is
+  learning: number; // how fast plastic synapses learn (0 = no learning within a lifetime)
+  pheromones: number; // how long chemical signals persist in the water (0 = none)
   autoSeed: boolean; // re-seed life if everything dies
 }
 
@@ -66,6 +100,8 @@ export const defaultParams = (): GodParams => ({
   tides: 1,
   humidity: 1,
   storms: 1,
+  learning: 1,
+  pheromones: 1,
   autoSeed: true,
 });
 
@@ -139,6 +175,7 @@ export const BIO = {
   BASE_METAB: 0.004, // energy per mass per second
   ORGAN_COST: [0.004, 0.004, 0.005, 0.003, 0.002, 0.006, 0.0015, 0.001, 0.002],
   BRAIN_COST: 0.0006, // per hidden node (connections count 0.2)
+  LEARN_COST: 0.006, // per plastic synapse at learning rate 1: plasticity is metabolically expensive
   THRUST_COST: 0.06,
   GLOW_COST: 0.004,
   MOUTH_OPEN_COST: 0.0015,
@@ -162,4 +199,15 @@ export const BIO = {
   DECAY: 0.01, // detritus decomposition per second
   PARTICLE_SINK: 8,
   BURIAL: 0.0015,
+  // sexual reproduction
+  MATE_WAIT: 30, // seconds a ready organism with sex drive 1 courts before dividing alone
+  MATE_DIST: 0.55, // genetic distance beyond which two organisms cannot interbreed
+  MATE_GAP: 3, // gametes reach a partner this close (world units between membranes)
+  POLLEN_RANGE: 90, // rooted land plants cross-pollinate this far apart (plus the wind)
+  GAMETE_COST: 0.03, // energy per unit mass paid by the other parent
+  // chemical signalling (pheromones in the water)
+  SIG_EMIT: 1.2, // pheromone released per second at full output
+  SIG_COST: 0.02, // energy per unit mass per second at full output: signalling must pay for itself
+  SIG_DECAY: 0.35, // pheromones break down (per second)
+  DIFF_SIG: 0.15,
 };

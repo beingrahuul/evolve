@@ -98,6 +98,7 @@ uniform sampler2D u_f1;   // u, v, sulf, light
 uniform sampler2D u_floor;
 uniform sampler2D u_air;  // temp, humidity, cloud, rain
 uniform sampler2D u_soil; // moisture, organic, snow, temp
+uniform sampler2D u_f2;   // pheromone A, pheromone B
 uniform int u_overlay;
 uniform vec4 u_vents[8];
 uniform int u_nvents;
@@ -164,7 +165,8 @@ vec3 weather(vec2 p, vec3 c, float groundY) {
     c = mix(c, c * 0.8 + vec3(0.55, 0.6, 0.7) * (0.35 + 0.5 * day), drop * thin * amount * 0.55);
     c *= 1.0 - clamp(rain * 1.6, 0.0, 0.3);
   }
-  float cw = a.z;
+  // the top of the sky is the lid of the weather: fade clouds out towards it instead of cutting them off
+  float cw = a.z * smoothstep(0.0, 0.16, auv.y);
   if (cw < 0.004) return c;
   vec2 q = p * vec2(0.009, 0.016) + vec2(-u_time * 0.012 * u_wind, u_time * 0.002);
   float n = fbm(q);
@@ -365,6 +367,21 @@ vec3 overlayWater(vec3 c, vec4 f0, vec4 f1) {
   return mix(c, m * 0.9, 0.62);
 }
 
+// pheromone clouds: A violet, B aqua. Faint in the normal view, vivid in the Signals overlay.
+vec3 signals(vec3 c, vec4 f2) {
+  vec3 ca = vec3(0.72, 0.42, 1.0);
+  vec3 cb = vec3(0.3, 0.92, 0.95);
+  if (u_overlay == 9) {
+    float a = 1.0 - exp(-max(f2.x, 0.0) * 10.0);
+    float b = 1.0 - exp(-max(f2.y, 0.0) * 10.0);
+    vec3 m = vec3(0.03, 0.04, 0.07) + ca * a * 1.2 + cb * b * 1.2;
+    return mix(c * 0.4, m, 0.8);
+  }
+  float a = 1.0 - exp(-max(f2.x, 0.0) * 4.0);
+  float b = 1.0 - exp(-max(f2.y, 0.0) * 4.0);
+  return c + (ca * a + cb * b) * 0.1;
+}
+
 vec3 overlayAir(vec3 c, vec2 p) {
   if (u_overlay != 1 && u_overlay != 8) return c;
   vec2 auv = vec2(p.x / u_world.x, (p.y - u_airGrid.x) / u_airGrid.y);
@@ -407,6 +424,7 @@ void main() {
     vec4 f0 = texture(u_f0, uv);
     vec4 f1 = texture(u_f1, uv);
     c = overlayWater(water(p, surf, fy, f0, f1), f0, f1);
+    c = signals(c, texture(u_f2, uv));
     c = ventLayer(p, c);
   } else {
     c = sky(p);
@@ -509,18 +527,22 @@ in vec4 a_look;  // hue, energy, thrust, glow
 in vec4 a_al1;   // chloro, chemo, mouth, flagella
 in vec4 a_al2;   // armor, sensor, vacuole, storage
 in vec4 a_misc;  // seed, flags, health, inflate
-in vec4 a_ext;   // roots/cuticle, hydration, on land, -
+in vec4 a_ext;   // roots/cuticle, hydration, on land, buried
+in vec4 a_sex;   // courting, mating flash, pheromone A, pheromone B
 out vec2 v_p;
 flat out vec4 v_look;
 flat out vec4 v_al1;
 flat out vec4 v_al2;
 flat out vec4 v_misc;
 flat out vec4 v_ext;
+flat out vec4 v_sex;
 flat out float v_aa;
 void main() {
   float r = max(a_pr.z, 2.2 / u_cam.z);
   float tail = 1.0 + 0.8 + 2.3 * a_al1.w;
   float ext = max(max(1.6 + 0.9 * a_look.w, a_al1.w > 0.03 ? tail : 1.5), 1.55 + 0.45 * a_al2.y);
+  if (a_sex.x > 0.5 || a_sex.y > 0.0) ext = max(ext, 2.3);
+  if (a_sex.z + a_sex.w > 0.05) ext = max(ext, 2.0);
   vec2 local = a_quad * ext;
   float h = a_pr.w;
   vec2 fw = vec2(cos(h), sin(h));
@@ -532,6 +554,7 @@ void main() {
   v_al2 = a_al2;
   v_misc = a_misc;
   v_ext = a_ext;
+  v_sex = a_sex;
   v_aa = 1.2 / (r * u_cam.z);
   gl_Position = toClip(w);
 }
@@ -544,6 +567,7 @@ flat in vec4 v_al1;
 flat in vec4 v_al2;
 flat in vec4 v_misc;
 flat in vec4 v_ext;
+flat in vec4 v_sex;
 flat in float v_aa;
 out vec4 o;
 uniform float u_time;
@@ -695,6 +719,26 @@ void main() {
   if (v_ext.w > 0.5) col *= vec4(vec3(0.75, 0.62, 0.48), 0.7);
 
   if (glow > 0.02) col.rgb += (base * 1.4 + 0.25) * glow * exp(-max(d, 0.0) * 3.5) * 0.9 * (1.0 - inside * 0.4);
+  // pheromones: a faint coloured haze around a cell that is releasing them
+  float emit = v_sex.z + v_sex.w;
+  if (emit > 0.05) {
+    vec3 ec = (vec3(0.72, 0.42, 1.0) * v_sex.z + vec3(0.3, 0.92, 0.95) * v_sex.w) / emit;
+    float wisp = 0.6 + 0.4 * sin(ang * 3.0 - t * 2.5 + len * 4.0);
+    col.rgb += ec * min(1.0, emit) * exp(-max(d, 0.0) * 2.2) * step(0.0, d) * wisp * 0.45;
+  }
+  // courtship: a slow rose-coloured pulse around a cell ready to mate
+  if (v_sex.x > 0.5) {
+    float pr = 1.32 + 0.1 * sin(u_time * 3.0 + seed * 6.0);
+    float ring = smoothstep(0.1 + aa, 0.0, abs(len - pr));
+    col += vec4(vec3(1.0, 0.45, 0.68), 1.0) * ring * 0.55;
+  }
+  // mating: a bright burst that spreads and fades
+  if (v_sex.y > 0.0) {
+    float k = v_sex.y;
+    float br = 1.1 + 1.0 * (1.0 - k);
+    float burst = smoothstep(0.16 + aa, 0.0, abs(len - br)) * k;
+    col += vec4(vec3(1.0, 0.62, 0.8) * 1.6, 1.0) * burst;
+  }
   if (selected) {
     float sr = abs(len - (1.5 + 0.06 * sin(u_time * 4.0)));
     float ring = smoothstep(0.07 + aa, 0.0, sr);

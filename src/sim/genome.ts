@@ -37,9 +37,16 @@ export const INPUT_NAMES = [
   'in water',
   'hydration',
   'rain',
+  'signal A',
+  'signal B',
+  'sig A ∇',
+  'sig B ∇',
+  'kin glow',
+  'mate near',
+  'ready',
 ] as const;
 
-export const OUTPUT_NAMES = ['thrust', 'turn', 'eat', 'float', 'glow'] as const;
+export const OUTPUT_NAMES = ['thrust', 'turn', 'eat', 'float', 'glow', 'emit A', 'emit B'] as const;
 
 export const NI = INPUT_NAMES.length;
 export const NO = OUTPUT_NAMES.length;
@@ -77,9 +84,16 @@ export const IN = {
   InWater: 29,
   Hydration: 30,
   Rain: 31,
+  SigA: 32,
+  SigB: 33,
+  SigAGrad: 34,
+  SigBGrad: 35,
+  KinGlow: 36,
+  MateNear: 37,
+  Ready: 38,
 } as const;
 
-export const OUT = { Thrust: 0, Turn: 1, Eat: 2, Float: 3, Glow: 4 } as const;
+export const OUT = { Thrust: 0, Turn: 1, Eat: 2, Float: 3, Glow: 4, EmitA: 5, EmitB: 6 } as const;
 
 // ---------------------------------------------------------------------------
 // Cell-volume allocation: what fraction of the cell is devoted to each organelle
@@ -185,6 +199,8 @@ export interface ConnGene {
   to: number;
   w: number;
   on: boolean;
+  /** Plasticity: how (and whether) the synapse learns during a lifetime. 0 = hard-wired. */
+  p: number;
 }
 
 export interface Genome {
@@ -198,6 +214,10 @@ export interface Genome {
   mutRate: number;
   oscFreq: number; // internal clock (Hz)
   toxinRes: number;
+  /** Sex drive, 0..1: how long a ready organism courts a mate before dividing on its own. */
+  sex: number;
+  /** Learning rate, 0..1: how strongly plastic synapses change with reward during a lifetime. */
+  learn: number;
   nodes: NodeGene[]; // outputs first (ids NI..NI+NO-1), then hidden
   conns: ConnGene[];
   nextId: number;
@@ -247,6 +267,8 @@ export function cloneGenome(g: Genome): Genome {
     mutRate: g.mutRate,
     oscFreq: g.oscFreq,
     toxinRes: g.toxinRes,
+    sex: g.sex,
+    learn: g.learn,
     nodes: g.nodes.map((n) => ({ ...n })),
     conns: g.conns.map((c) => ({ ...c })),
     nextId: g.nextId,
@@ -268,6 +290,7 @@ export type Archetype =
   | 'stalker'
   | 'pioneer'
   | 'plant'
+  | 'shoaler'
   | 'random';
 
 export const ARCHETYPE_LABELS: Record<Archetype, string> = {
@@ -280,10 +303,12 @@ export const ARCHETYPE_LABELS: Record<Archetype, string> = {
   stalker: 'Stalker (multicellular predator)',
   pioneer: 'Intertidal pioneer (tolerates drying)',
   plant: 'Land plant (roots, stem, leaves)',
+  shoaler: 'Shoaling grazer (mates, learns, signals)',
   random: 'Random protocell',
 };
 
-type Wire = [from: number, out: number, w: number];
+/** A starting synapse; the optional 4th value makes it plastic (it learns from reward). */
+type Wire = [from: number, out: number, w: number, plastic?: number];
 
 type BodyCell = [parent: number, angleDeg: number, type: number, size: number];
 
@@ -293,6 +318,9 @@ interface Preset {
   temp: number;
   tol: number;
   hue: number;
+  /** Sex drive (0 = always divides alone) and learning rate. */
+  sex: number;
+  learn: number;
   wires: Wire[];
   body?: BodyCell[];
 }
@@ -309,6 +337,7 @@ const SIG_BASE: Record<Exclude<Archetype, 'random'>, number[]> = {
   plant: [0.1, 0.55, 0.15],
   colony: [0.1, 0.9, 0.5],
   stalker: [0.9, 0.5, 0.1],
+  shoaler: [0.55, 0.45, 0.95],
 };
 
 const PRESETS: Record<Exclude<Archetype, 'random'>, Preset> = {
@@ -318,6 +347,8 @@ const PRESETS: Record<Exclude<Archetype, 'random'>, Preset> = {
     temp: 20,
     tol: 12,
     hue: 0.3,
+    sex: 0,
+    learn: 0,
     wires: [
       [IN.Bias, O(OUT.Thrust), 0.2],
       [IN.Depth, O(OUT.Float), 2.5],
@@ -332,6 +363,8 @@ const PRESETS: Record<Exclude<Archetype, 'random'>, Preset> = {
     temp: 28,
     tol: 20,
     hue: 0.08,
+    sex: 0.1,
+    learn: 0,
     wires: [
       [IN.Bias, O(OUT.Float), -2.0],
       [IN.Bias, O(OUT.Thrust), 0.5],
@@ -345,9 +378,11 @@ const PRESETS: Record<Exclude<Archetype, 'random'>, Preset> = {
     temp: 18,
     tol: 12,
     hue: 0.55,
+    sex: 0.3,
+    learn: 0.08,
     wires: [
       [IN.CellSide, O(OUT.Turn), 2.5],
-      [IN.CellFwd, O(OUT.Thrust), 1.2],
+      [IN.CellFwd, O(OUT.Thrust), 1.2, 0.4],
       [IN.Bias, O(OUT.Thrust), 0.25],
       [IN.Bias, O(OUT.Eat), 1.0],
       [IN.CellKin, O(OUT.Eat), -2.5],
@@ -362,15 +397,18 @@ const PRESETS: Record<Exclude<Archetype, 'random'>, Preset> = {
     temp: 16,
     tol: 12,
     hue: 0.95,
+    sex: 0.4,
+    learn: 0.12,
     wires: [
       [IN.CellSide, O(OUT.Turn), 3.0],
-      [IN.CellFwd, O(OUT.Thrust), 1.5],
+      [IN.CellFwd, O(OUT.Thrust), 1.5, 0.5],
       [IN.CellSize, O(OUT.Thrust), -1.0],
       [IN.Bias, O(OUT.Thrust), 0.3],
       [IN.Bias, O(OUT.Eat), 1.0],
       [IN.CellKin, O(OUT.Eat), -2.5],
       [IN.Depth, O(OUT.Float), 2.0],
       [IN.Clock, O(OUT.Turn), 0.6],
+      [IN.CellGreen, O(OUT.Thrust), 0.3, 0.6],
     ],
   },
   scavenger: {
@@ -379,9 +417,11 @@ const PRESETS: Record<Exclude<Archetype, 'random'>, Preset> = {
     temp: 10,
     tol: 12,
     hue: 0.12,
+    sex: 0.2,
+    learn: 0.05,
     wires: [
       [IN.FoodSide, O(OUT.Turn), 3.0],
-      [IN.FoodFwd, O(OUT.Thrust), 1.5],
+      [IN.FoodFwd, O(OUT.Thrust), 1.5, 0.4],
       [IN.Bias, O(OUT.Thrust), 0.2],
       [IN.Bias, O(OUT.Eat), 1.0],
       [IN.CellKin, O(OUT.Eat), -2.5],
@@ -396,6 +436,8 @@ const PRESETS: Record<Exclude<Archetype, 'random'>, Preset> = {
     temp: 19,
     tol: 12,
     hue: 0.36,
+    sex: 0.5,
+    learn: 0,
     wires: [
       [IN.Bias, O(OUT.Thrust), 0.25],
       [IN.Depth, O(OUT.Float), 2.5],
@@ -420,10 +462,12 @@ const PRESETS: Record<Exclude<Archetype, 'random'>, Preset> = {
     temp: 16,
     tol: 12,
     hue: 0.98,
+    sex: 0.6,
+    learn: 0.15,
     wires: [
       [IN.CellSide, O(OUT.Turn), 3.0],
       [IN.CellFwd, O(OUT.Thrust), 1.5],
-      [IN.CellGreen, O(OUT.Thrust), 0.6],
+      [IN.CellGreen, O(OUT.Thrust), 0.6, 0.6],
       [IN.Bias, O(OUT.Thrust), 0.3],
       [IN.Bias, O(OUT.Eat), 1.0],
       [IN.CellKin, O(OUT.Eat), -2.5],
@@ -447,6 +491,8 @@ const PRESETS: Record<Exclude<Archetype, 'random'>, Preset> = {
     temp: 18,
     tol: 15,
     hue: 0.22,
+    sex: 0.2,
+    learn: 0,
     wires: [
       [IN.Bias, O(OUT.Thrust), 0.15],
       [IN.Depth, O(OUT.Float), 1.5],
@@ -462,6 +508,8 @@ const PRESETS: Record<Exclude<Archetype, 'random'>, Preset> = {
     temp: 16,
     tol: 16,
     hue: 0.28,
+    sex: 0.7,
+    learn: 0,
     wires: [[IN.Bias, O(OUT.Thrust), -1]],
     body: [
       [0, 180, CT.Root, 0.8],
@@ -470,6 +518,35 @@ const PRESETS: Record<Exclude<Archetype, 'random'>, Preset> = {
       [3, -35, CT.Photo, 0.85],
       [3, 35, CT.Photo, 0.85],
       [3, 0, CT.Photo, 0.8],
+    ],
+  },
+  // mates in schools, learns what is worth chasing, and smells danger: an alarm pheromone (A)
+  // when hurt makes kin flee, and a courtship pheromone (B) draws mates together
+  shoaler: {
+    alloc: [0.08, 0.02, 0.6, 0.5, 0.05, 0.55, 0.3, 0.2, 0.01],
+    div: 11,
+    temp: 18,
+    tol: 12,
+    hue: 0.62,
+    sex: 0.8,
+    learn: 0.25,
+    wires: [
+      [IN.CellSide, O(OUT.Turn), 2.5, 0.3],
+      [IN.CellFwd, O(OUT.Thrust), 1.2, 0.5],
+      [IN.CellGreen, O(OUT.Thrust), 0.4, 0.8],
+      [IN.Bias, O(OUT.Thrust), 0.25],
+      [IN.Bias, O(OUT.Eat), 1.0],
+      [IN.CellKin, O(OUT.Eat), -2.5],
+      [IN.Depth, O(OUT.Float), 3.0],
+      [IN.Bias, O(OUT.Float), 0.4],
+      [IN.KinFwd, O(OUT.Thrust), 0.5],
+      [IN.KinSide, O(OUT.Turn), 0.8],
+      [IN.MateNear, O(OUT.Thrust), 0.8],
+      [IN.Pain, O(OUT.EmitA), 2.5],
+      [IN.SigA, O(OUT.Thrust), 1.4],
+      [IN.Ready, O(OUT.EmitB), 1.5],
+      [IN.SigBGrad, O(OUT.Thrust), 1.0],
+      [IN.Clock, O(OUT.Turn), 0.5],
     ],
   },
 };
@@ -488,6 +565,8 @@ function baseGenome(rng: Rng): Genome {
     mutRate: 1,
     oscFreq: rng.range(0.2, 1.2),
     toxinRes: 0.05,
+    sex: 0,
+    learn: 0,
     nodes,
     conns: [],
     nextId: NI + NO,
@@ -503,10 +582,12 @@ export function makeGenome(rng: Rng, arch: Archetype): Genome {
     g.tempOpt = rng.range(8, 30);
     const n = 3 + rng.int(5);
     for (let i = 0; i < n; i++) {
-      g.conns.push({ from: rng.int(NI), to: NI + rng.int(NO), w: rng.gauss() * 1.5, on: true });
+      g.conns.push({ from: rng.int(NI), to: NI + rng.int(NO), w: rng.gauss() * 1.5, on: true, p: rng.chance(0.2) ? rng.gauss() * 0.5 : 0 });
     }
     // always give a way to eat if it has a mouth
-    g.conns.push({ from: 0, to: NI + OUT.Eat, w: 1, on: true });
+    g.conns.push({ from: 0, to: NI + OUT.Eat, w: 1, on: true, p: 0 });
+    g.sex = rng.chance(0.5) ? 0 : rng.range(0, 0.4);
+    g.learn = rng.chance(0.7) ? 0 : rng.range(0.02, 0.2);
     return g;
   }
   const p = PRESETS[arch];
@@ -518,7 +599,9 @@ export function makeGenome(rng: Rng, arch: Archetype): Genome {
   // members of one seeded lineage share a chemical signature
   const base = SIG_BASE[arch];
   g.sig = base.map((v) => clamp(v + rng.gauss() * 0.02, 0, 1));
-  for (const [from, to, w] of p.wires) g.conns.push({ from, to, w: w + rng.gauss() * 0.15, on: true });
+  g.sex = p.sex;
+  g.learn = p.learn;
+  for (const [from, to, w, plastic] of p.wires) g.conns.push({ from, to, w: w + rng.gauss() * 0.15, on: true, p: plastic ?? 0 });
   if (p.body) {
     g.body = p.body.map(([parent, deg, type, size]) => ({
       parent,
@@ -559,6 +642,12 @@ export function mutate(parent: Genome, rng: Rng, globalRate: number): Genome {
   if (rng.chance(pm(0.08, m))) g.mutRate = clamp(g.mutRate * Math.exp(rng.gauss() * 0.15), 0.2, 3);
   if (rng.chance(pm(0.1, m))) g.oscFreq = clamp(g.oscFreq * Math.exp(rng.gauss() * 0.2), 0.02, 4);
   if (rng.chance(pm(0.1, m))) g.toxinRes = clamp(g.toxinRes + rng.gauss() * 0.05, 0, 1);
+  if (rng.chance(pm(0.1, m))) g.sex = clamp(g.sex + rng.gauss() * 0.08, 0, 1);
+  if (rng.chance(pm(0.1, m))) {
+    // learning can switch on in a hard-wired lineage, and fade back to nothing
+    const l = g.learn > 0 ? g.learn * Math.exp(rng.gauss() * 0.25) + rng.gauss() * 0.01 : rng.chance(0.3) ? rng.range(0.01, 0.05) : 0;
+    g.learn = l < 0.005 ? 0 : Math.min(1, l);
+  }
 
   mutateBody(g, rng, m);
 
@@ -567,6 +656,8 @@ export function mutate(parent: Genome, rng: Rng, globalRate: number): Genome {
     if (rng.chance(pm(0.18, m))) c.w = clamp(c.w + rng.gauss() * 0.4, -6, 6);
     if (rng.chance(pm(0.015, m))) c.w = rng.gauss() * 1.5;
     if (rng.chance(pm(0.01, m))) c.on = !c.on;
+    if (rng.chance(pm(0.04, m))) c.p = c.p === 0 ? rng.gauss() * 0.6 : clamp(c.p + rng.gauss() * 0.25, -1, 1);
+    if (c.p !== 0 && rng.chance(pm(0.01, m))) c.p = 0;
   }
   for (const nd of g.nodes) {
     if (rng.chance(pm(0.08, m))) nd.bias = clamp(nd.bias + rng.gauss() * 0.3, -4, 4);
@@ -580,7 +671,7 @@ export function mutate(parent: Genome, rng: Rng, globalRate: number): Genome {
     const from = s < NI ? s : g.nodes[NO + (s - NI)].id;
     const to = g.nodes[rng.int(g.nodes.length)].id;
     if (!g.conns.some((c) => c.from === from && c.to === to)) {
-      g.conns.push({ from, to, w: rng.gauss() * 1.2, on: true });
+      g.conns.push({ from, to, w: rng.gauss() * 1.2, on: true, p: rng.chance(0.2) ? rng.gauss() * 0.5 : 0 });
     }
   }
   // add a node by splitting a connection (NEAT style)
@@ -595,8 +686,8 @@ export function mutate(parent: Genome, rng: Rng, globalRate: number): Genome {
       const id = g.nextId++;
       g.nodes.push({ id, order, bias: 0, act: 0 });
       c.on = false;
-      g.conns.push({ from: c.from, to: id, w: 1, on: true });
-      g.conns.push({ from: id, to: c.to, w: c.w, on: true });
+      g.conns.push({ from: c.from, to: id, w: 1, on: true, p: 0 });
+      g.conns.push({ from: id, to: c.to, w: c.w, on: true, p: c.p });
     }
   }
   // remove a connection
@@ -642,6 +733,70 @@ function mutateBody(g: Genome, rng: Rng, m: number) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Sexual recombination
+// ---------------------------------------------------------------------------
+
+/**
+ * A child genome with genes from two parents. `a` is the parent that carries the offspring: synapses
+ * only the other parent has are inherited half the time (as NEAT does with a fitter parent).
+ */
+export function crossover(a: Genome, b: Genome, rng: Rng): Genome {
+  const pick = <T>(x: T, y: T): T => (rng.next() < 0.5 ? x : y);
+  const g = cloneGenome(a);
+  for (let i = 0; i < NALLOC; i++) g.alloc[i] = pick(a.alloc[i], b.alloc[i]);
+  g.divMass = pick(a.divMass, b.divMass);
+  g.tempOpt = pick(a.tempOpt, b.tempOpt);
+  g.tempTol = pick(a.tempTol, b.tempTol);
+  g.lifespan = pick(a.lifespan, b.lifespan);
+  g.hue = pick(a.hue, b.hue);
+  g.mutRate = pick(a.mutRate, b.mutRate);
+  g.oscFreq = pick(a.oscFreq, b.oscFreq);
+  g.toxinRes = pick(a.toxinRes, b.toxinRes);
+  g.sex = pick(a.sex, b.sex);
+  g.learn = pick(a.learn, b.learn);
+  // the chemical signature blends, so an interbreeding population stays one recognisable kin group
+  for (let i = 0; i < 3; i++) g.sig[i] = (a.sig[i] + b.sig[i]) * 0.5;
+
+  // body plan: aligned cell by cell. Every cell grows from an earlier one, so any mix is a valid plan.
+  const [long, short] = pick(true, false) ? [a.body, b.body] : [b.body, a.body];
+  g.body = long.map((c, i) => ({ ...(i < short.length && rng.next() < 0.5 ? short[i] : c) }));
+
+  // brain: the union of both parents' neurons; synapses matched by their endpoints come from either
+  const nodes = new Map<number, NodeGene>();
+  for (const n of a.nodes) nodes.set(n.id, { ...n });
+  for (const n of b.nodes) if (!nodes.has(n.id) || rng.next() < 0.5) nodes.set(n.id, { ...n });
+  const key = (c: ConnGene) => c.from * 100003 + c.to;
+  const fromB = new Map<number, ConnGene>();
+  for (const c of b.conns) fromB.set(key(c), c);
+  const conns: ConnGene[] = [];
+  for (const c of a.conns) {
+    const m = fromB.get(key(c));
+    if (m) {
+      fromB.delete(key(c));
+      const ch = { ...pick(c, m) };
+      // a gene disabled in either parent is usually disabled in the child
+      if (c.on !== m.on) ch.on = rng.next() < 0.25;
+      conns.push(ch);
+    } else conns.push({ ...c });
+  }
+  for (const c of fromB.values()) if (rng.next() < 0.5) conns.push({ ...c });
+  // keep the neurons the synapses use (outputs always), within the size limits
+  const used = new Set<number>();
+  for (const c of conns) {
+    used.add(c.from);
+    used.add(c.to);
+  }
+  const outputs: NodeGene[] = [];
+  for (let k = 0; k < NO; k++) outputs.push(nodes.get(NI + k) ?? { id: NI + k, order: 1, bias: 0, act: 0 });
+  const hidden = [...nodes.values()].filter((n) => n.id >= NI + NO && used.has(n.id)).slice(0, MAX_HIDDEN);
+  g.nodes = outputs.concat(hidden);
+  const exists = new Set(g.nodes.map((n) => n.id));
+  g.conns = conns.filter((c) => (c.from < NI || exists.has(c.from)) && exists.has(c.to)).slice(0, MAX_CONNS);
+  g.nextId = Math.max(a.nextId, b.nextId);
+  return g;
+}
+
 function orderOf(g: Genome, id: number): number {
   if (id < NI) return 0;
   const n = g.nodes.find((x) => x.id === id);
@@ -677,6 +832,7 @@ export function genomeDistance(a: Genome, b: Genome): number {
   d += Math.sqrt(s0 * s0 + s1 * s1 + s2 * s2) * 1.2;
   d += Math.abs(a.nodes.length - b.nodes.length) * 0.04;
   d += Math.abs(a.body.length - b.body.length) * 0.12;
+  d += Math.abs(a.sex - b.sex) * 0.25 + Math.abs(a.learn - b.learn) * 0.4;
   return d;
 }
 

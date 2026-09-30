@@ -89,7 +89,10 @@ export class Terrain {
   vents: Vent[] = [];
   nextId = 1;
   landRight = true;
+  /** Where the main continent meets the sea. */
   coastX = WORLD_W * 0.65;
+  /** Beaches of the continent and the islands (dir points inland), for seeding intertidal life. */
+  shores: { x: number; dir: number }[] = [];
   /** Bumped whenever the ground changes shape (the renderer re-uploads it). */
   version = 0;
 
@@ -98,17 +101,34 @@ export class Terrain {
     const n2 = new Noise1D(rng);
     // one side of the world rises out of the sea: continental shelf → beach → hills → mountains
     const n3 = new Noise1D(rng);
+    const scale = WORLD_W / 1920;
     this.landRight = rng.chance(0.5);
-    this.coastX = this.landRight ? rng.range(0.6, 0.7) * WORLD_W : rng.range(0.3, 0.4) * WORLD_W;
+    const u = this.landRight ? rng.range(0.6, 0.7) : rng.range(0.3, 0.4);
+    // wider worlds get a broader continent (and, below, islands in the open sea)
+    const landW = (this.landRight ? 1 - u : u) * 1920 * (1 + 0.5 * (scale - 1));
+    this.coastX = scale === 1 ? u * WORLD_W : this.landRight ? WORLD_W - landW : landW;
     const SHELF = 820;
     const peak = rng.range(230, 330);
+    const islands: { x: number; hw: number; peak: number; shelf: number }[] = [];
+    const nIslands = Math.round(scale) - 1;
+    const oceanW = this.landRight ? this.coastX - SHELF : WORLD_W - this.coastX - SHELF;
+    for (let k = 0; k < nIslands; k++) {
+      const f = (k + 1) / (nIslands + 1) + rng.range(-0.08, 0.08);
+      const d = oceanW * f;
+      islands.push({
+        x: this.landRight ? d : WORLD_W - d,
+        hw: rng.range(130, 260),
+        peak: rng.range(40, 170),
+        shelf: rng.range(320, 480),
+      });
+    }
     for (let i = 0; i < NFLOOR; i++) {
       const x = i * FLOOR_RES;
       const inland = this.landRight ? x - this.coastX : this.coastX - x;
       let ocean = WORLD_H - 95 - 60 * n1.fbm(x / 420, 4) - 18 * n2.fbm(x / 70, 3);
       // the far ocean wall still curves up gently so the basin reads as a basin
-      const seaEdge = (this.landRight ? x : WORLD_W - x) / WORLD_W;
-      ocean -= Math.max(0, 0.1 - seaEdge) * 500;
+      const edge = this.landRight ? x : WORLD_W - x;
+      ocean -= Math.max(0, 192 - edge) * (500 / 1920);
       ocean = Math.max(WORLD_H - 230, Math.min(WORLD_H - 25, ocean));
       let y: number;
       if (inland < -SHELF) y = ocean;
@@ -134,12 +154,31 @@ export class Terrain {
         const k = t * t * (3 - 2 * t);
         y = -22 - peak * k - 45 * k * n1.fbm(x / 180 + 7, 4) - 12 * n2.fbm(x / 40 + 3, 3);
       }
+      // volcanic islands: a steep slope, a ring of beach and a peak
+      for (const isl of islands) {
+        const inI = isl.hw - Math.abs(x - isl.x);
+        if (inI < -isl.shelf) continue;
+        let yi: number;
+        if (inI < 0) {
+          const k = (inI + isl.shelf) / isl.shelf;
+          const s = k * k * (3 - 2 * k);
+          yi = ocean + (12 + 5 * n3.at(x / 40) - ocean) * s;
+        } else if (inI < 60) yi = 12 - inI * 0.36 + 2 * n3.at(x / 30);
+        else {
+          const t = Math.min(1, (inI - 60) / Math.max(40, isl.hw - 60));
+          const k = t * t * (3 - 2 * t);
+          yi = -10 - isl.peak * k - 25 * k * n1.fbm(x / 120 + 3, 3);
+        }
+        if (yi < y) y = yi;
+      }
       this.floor[i] = Math.max(-SKY_H + 90, Math.min(WORLD_H - 25, y));
     }
+    this.shores = [{ x: this.coastX, dir: this.landRight ? 1 : -1 }];
+    for (const isl of islands) this.shores.push({ x: isl.x - isl.hw, dir: 1 }, { x: isl.x + isl.hw, dir: -1 });
 
     // hydrothermal vents
-    const ventCount = 2 + rng.int(2);
-    for (let tries = 0; this.vents.length < ventCount && tries < 400; tries++) {
+    const ventCount = Math.round((2 + rng.int(2)) * scale);
+    for (let tries = 0; this.vents.length < ventCount && tries < 400 * scale; tries++) {
       const x = rng.range(160, WORLD_W - 160);
       if (this.floorY(x) < WORLD_H * 0.6) continue;
       if (this.vents.some((v) => Math.abs(v.x - x) < 300)) continue;
@@ -147,8 +186,8 @@ export class Terrain {
     }
 
     // boulders
-    const nRocks = 9 + rng.int(5);
-    for (let tries = 0; this.rocks.length < nRocks && tries < 400; tries++) {
+    const nRocks = Math.round((9 + rng.int(5)) * scale);
+    for (let tries = 0; this.rocks.length < nRocks && tries < 400 * scale; tries++) {
       const x = rng.range(40, WORLD_W - 40);
       const r = rng.range(16, 52);
       if (this.floorY(x) < 120) continue;
@@ -158,7 +197,7 @@ export class Terrain {
       this.addRock(x, this.floorY(x) + r * 0.35, r, type, rng);
     }
     // a couple of rock spires reaching up into the water column
-    for (let s = 0; s < 2; s++) {
+    for (let s = 0; s < Math.round(2 * scale); s++) {
       const x = rng.range(200, WORLD_W - 200);
       if (this.floorY(x) < WORLD_H * 0.6) continue;
       if (this.vents.some((v) => Math.abs(v.x - x) < 140)) continue;

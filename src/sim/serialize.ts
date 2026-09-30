@@ -1,12 +1,12 @@
 // Saving and restoring a whole world as plain JSON (typed arrays are base64-encoded).
-import { Archetype, Genome, NALLOC } from './genome';
+import { Archetype, Genome, NALLOC, NI, NO, NodeGene } from './genome';
 import { Organism } from './organism';
-import { AIR_NX, AIR_NY, GodParams, NX, NY, defaultParams } from './params';
+import { AIR_NX, AIR_NY, GodParams, NX, NY, defaultParams, setWorldWidth } from './params';
 import { Species } from './species';
 import { ROCK_TYPES } from './terrain';
 import { World } from './world';
 
-export const SAVE_VERSION = 3;
+export const SAVE_VERSION = 4;
 
 // ---------------------------------------------------------------------------
 // helpers
@@ -40,6 +40,8 @@ type GenomeJSON = {
   m: number;
   o: number;
   x: number;
+  sx?: number;
+  ln?: number;
   n: number[][];
   c: (number | boolean)[][];
   ni: number;
@@ -58,23 +60,33 @@ export function encodeGenome(g: Genome): GenomeJSON {
     m: r5(g.mutRate),
     o: r5(g.oscFreq),
     x: r5(g.toxinRes),
+    sx: r5(g.sex),
+    ln: r5(g.learn),
     n: g.nodes.map((n) => [n.id, r5(n.order), r5(n.bias), n.act]),
-    c: g.conns.map((c) => [c.from, c.to, r5(c.w), c.on]),
+    c: g.conns.map((c) => (c.p ? [c.from, c.to, r5(c.w), c.on, r5(c.p)] : [c.from, c.to, r5(c.w), c.on])),
     ni: g.nextId,
     b: g.body.map((c) => [c.parent, r5(c.angle), c.type, r5(c.size)]),
   };
 }
 
-/** Version-2 genomes had 29 sensory inputs; three were added in version 3, shifting node ids. */
-function migrateGenome(j: GenomeJSON, version: number): GenomeJSON {
-  if (version >= 3) return j;
-  const shift = (id: number) => (id >= 29 ? id + 3 : id);
+/** Renumber a genome's neurons (inputs come first, so new senses shift everything after them). */
+function renumber(j: GenomeJSON, shift: (id: number) => number, grow: number): GenomeJSON {
   return {
     ...j,
     n: j.n.map(([id, order, bias, act]) => [shift(id), order, bias, act]),
-    c: j.c.map(([from, to, w, on]) => [shift(from as number), shift(to as number), w, on]),
-    ni: j.ni + 3,
+    c: j.c.map(([from, to, ...rest]) => [shift(from as number), shift(to as number), ...rest]),
+    ni: j.ni + grow,
   };
+}
+
+/**
+ * Version 2 had 29 senses (3 were added in version 3); version 3 had 32 senses and 5 actions
+ * (version 4 added 7 senses and 2 actions: pheromones, kin glow, mating).
+ */
+function migrateGenome(j: GenomeJSON, version: number): GenomeJSON {
+  if (version < 3) j = renumber(j, (id) => (id >= 29 ? id + 3 : id), 3);
+  if (version < 4) j = renumber(j, (id) => (id < 32 ? id : id < 37 ? id + 7 : id + 9), 9);
+  return j;
 }
 
 export function decodeGenome(j: GenomeJSON, version = SAVE_VERSION): Genome {
@@ -92,11 +104,21 @@ export function decodeGenome(j: GenomeJSON, version = SAVE_VERSION): Genome {
     mutRate: j.m,
     oscFreq: j.o,
     toxinRes: j.x,
-    nodes: j.n.map(([id, order, bias, act]) => ({ id, order, bias, act })),
-    conns: j.c.map(([from, to, w, on]) => ({ from: from as number, to: to as number, w: w as number, on: !!on })),
+    sex: j.sx ?? 0,
+    learn: j.ln ?? 0,
+    nodes: withOutputs(j.n.map(([id, order, bias, act]) => ({ id, order, bias, act }))),
+    conns: j.c.map(([from, to, w, on, p]) => ({ from: from as number, to: to as number, w: w as number, on: !!on, p: (p as number) ?? 0 })),
     nextId: j.ni,
     body: (j.b ?? []).map(([parent, angle, type, size]) => ({ parent, angle, type, size })),
   };
+}
+
+/** Output neurons first, in order (actions added since the save was made start unconnected). */
+function withOutputs(nodes: NodeGene[]): NodeGene[] {
+  const byId = new Map(nodes.map((n) => [n.id, n]));
+  const outs: NodeGene[] = [];
+  for (let k = 0; k < NO; k++) outs.push(byId.get(NI + k) ?? { id: NI + k, order: 1, bias: 0, act: 0 });
+  return outs.concat(nodes.filter((n) => n.id >= NI + NO));
 }
 
 // ---------------------------------------------------------------------------
@@ -104,6 +126,8 @@ export function decodeGenome(j: GenomeJSON, version = SAVE_VERSION): Genome {
 export interface SaveMeta {
   version: number;
   seed: number;
+  /** World width (version 4; older worlds are 1920 wide). */
+  width?: number;
   savedAt: string;
   day: number;
   population: number;
@@ -118,6 +142,7 @@ export function serializeWorld(w: World): Record<string, unknown> {
   const meta: SaveMeta = {
     version: SAVE_VERSION,
     seed: w.seed,
+    width: w.width,
     savedAt: new Date().toISOString(),
     day: w.days + 1,
     population: w.orgs.length,
@@ -133,6 +158,7 @@ export function serializeWorld(w: World): Record<string, unknown> {
       sediment: w.sediment,
       totalBorn: w.totalBorn,
       totalDied: w.totalDied,
+      totalMatings: w.totalMatings,
       deathCauses: [...w.deathCauses.entries()],
       archSpecies: [...w.archSpecies.entries()],
       events: w.events.slice(-60),
@@ -145,6 +171,8 @@ export function serializeWorld(w: World): Record<string, unknown> {
       co2: b64(F.co2.subarray(0, N)),
       nut: b64(F.nut.subarray(0, N)),
       sulf: b64(F.sulf.subarray(0, N)),
+      sigA: b64(F.sigA.subarray(0, N)),
+      sigB: b64(F.sigB.subarray(0, N)),
       light: b64(F.light.subarray(0, N)),
       atmO2: F.atmO2,
       atmCO2: F.atmCO2,
@@ -170,6 +198,7 @@ export function serializeWorld(w: World): Record<string, unknown> {
     terrain: {
       landRight: w.terrain.landRight,
       coastX: w.terrain.coastX,
+      shores: w.terrain.shores,
       floor: b64(w.terrain.floor),
       nextId: w.terrain.nextId,
       rocks: w.terrain.rocks.map((r) => ({ id: r.id, type: r.type.key, x: r.x, y: r.y, r: r.r, r0: r.r0, seed: r.seed, released: r.released })),
@@ -215,6 +244,9 @@ export function serializeWorld(w: World): Record<string, unknown> {
       nc: o.nCells,
       hy: r5(o.hydration),
       bv: Array.from(o.brain.values, r5),
+      // sex and learning (version 4): courting, since mating, father, mates, expected intake, learned weights
+      x4: [o.courting, Math.min(o.sinceMating, 1e6), o.father, o.mates, o.gainSlow].map(r5),
+      bw: o.genome.learn > 0 && o.brain.plasticCount > 0 ? Array.from(o.brain.cW, r5) : undefined,
     })),
     stats: w.stats.samples,
   };
@@ -224,6 +256,7 @@ export function deserializeWorld(d: any): World {
   if (!d || !d.meta || typeof d.meta.version !== 'number') throw new Error('This is not a Primordial save file.');
   if (d.meta.version > SAVE_VERSION) throw new Error('This save was made by a newer version of Primordial.');
   const params: GodParams = { ...defaultParams(), ...d.params };
+  setWorldWidth(d.meta.width ?? 1920);
   const w = new World(d.meta.seed, params, true);
   const version: number = d.meta.version;
   const N = NX * NY;
@@ -245,6 +278,7 @@ export function deserializeWorld(d: any): World {
   if (d.terrain.coastX !== undefined) {
     w.terrain.landRight = d.terrain.landRight;
     w.terrain.coastX = d.terrain.coastX;
+    w.terrain.shores = d.terrain.shores ?? [{ x: w.terrain.coastX, dir: w.terrain.landRight ? 1 : -1 }];
   } else {
     // a version-2 world is all ocean
     w.terrain.landRight = true;
@@ -273,6 +307,8 @@ export function deserializeWorld(d: any): World {
   fset(F.co2, d.fields.co2);
   fset(F.nut, d.fields.nut);
   fset(F.sulf, d.fields.sulf);
+  if (d.fields.sigA) fset(F.sigA, d.fields.sigA);
+  if (d.fields.sigB) fset(F.sigB, d.fields.sigB);
   fset(F.light, d.fields.light);
   F.atmO2 = d.fields.atmO2;
   F.atmCO2 = d.fields.atmCO2;
@@ -331,6 +367,9 @@ export function deserializeWorld(d: any): World {
     if (typeof j.hy === 'number') o.hydration = j.hy;
     o.onLand = !(o.y > F.seaLevel && w.terrain.floorY(o.x) > F.seaLevel);
     if (Array.isArray(j.bv) && j.bv.length === o.brain.values.length) o.brain.values.set(j.bv);
+    if (Array.isArray(j.x4)) [o.courting, o.sinceMating, o.father, o.mates, o.gainSlow] = j.x4;
+    if (Array.isArray(j.bw)) o.brain.setWeights(j.bw);
+    o.intakeMark = o.eLight + o.eChem + o.eFood + o.ePrey;
     w.orgs.push(o);
     w.orgById.set(o.id, o);
     const sp = w.species.get(o.species);
@@ -343,6 +382,7 @@ export function deserializeWorld(d: any): World {
   w.sediment = ws.sediment;
   w.totalBorn = ws.totalBorn;
   w.totalDied = ws.totalDied;
+  w.totalMatings = ws.totalMatings ?? 0;
   w.deathCauses = new Map(ws.deathCauses);
   w.archSpecies = new Map(ws.archSpecies as [Archetype, number][]);
   w.events = ws.events ?? [];

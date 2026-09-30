@@ -1,11 +1,13 @@
 # Primordial
 
-An artificial-life sandbox. It is a 2D cross-section of a primordial world: a sea with tides, a sky with weather, and a shore rising into land. Cells with genomes and neural-network brains live, compete, evolve into multicellular bodies and colonise the land, under simplified physics and chemistry. You are god: change the laws of nature, reshape the world, and click anything to inspect it.
+An artificial-life sandbox. It is a 2D cross-section of a primordial world: a sea with tides, a sky with weather, and a shore rising into land. Cells with genomes and neural-network brains live, compete, evolve into multicellular bodies and colonise the land, under simplified physics and chemistry. They court and mate, learn during their lives and signal to each other with pheromones. You are god: change the laws of nature, reshape the world, and click anything to inspect it.
 
 ```bash
 npm install
-npm run dev        # open http://localhost:5173  (add ?seed=123 for a specific world)
+npm run dev        # open http://localhost:5173
 ```
+
+URL options: `?seed=123` for a specific world, `?size=standard` or `?size=vast` for another size (the default is wide), `?worker=0` to simulate on the main thread.
 
 ## What's simulated
 
@@ -23,34 +25,47 @@ npm run dev        # open http://localhost:5173  (add ?seed=123 for a specific w
 | **Bodies** | A body plan of up to 12 cells: a generalist core plus specialists (photocyte, chemocyte, mouth, motor, shell, eye, float, fat and root cells). A specialist cell is more efficient than a generalist. Bodies grow cell by cell from a bud; single cells split in two. |
 | **Senses** | Eye cells extend sight only in the direction they face. Chemotaxis compares the light, nutrients and sulfide just ahead with just behind. Kin are sensed separately from strangers. |
 | **Life on land** | Out of the water, cells breathe the air, take nutrients and water from the soil, and dry out unless protected by a waxy cuticle or rooted in moist soil. They crawl or root: rooted plants turn their growing tip towards the light and compete to be tallest, because the canopy shades everything below it. Seeds ride the wind, and bodies rot into humus. |
+| **Sex** | A sex-drive gene sets how long an organism that is ready to breed courts a mate (shown by a rose-coloured pulse) before dividing alone. Two courting organisms close enough to exchange gametes, and genetically close enough to interbreed, both conceive. Their young get each gene from one parent or the other (NEAT-style crossover of the brain; the body plan is aligned cell by cell). Rooted plants cross-pollinate over a distance, further downwind. Whether sex pays is left to evolution: in some worlds it spreads, in others clones win. |
+| **Learning** | Synapses can be plastic. A reward signal (food intake better or worse than the organism expected, minus pain) strengthens or weakens the plastic synapses that were recently active, through eligibility traces. Learned weights fade back to the genome's over a minute or two and are not inherited. Plasticity costs energy, and both the learning rate and which synapses learn are genes. |
+| **Signals** | Two pheromones (A and B) are released by brain outputs, drift with the currents and break down. Cells sense how strong each is and whether it is stronger ahead or behind. They also see the glow of their nearest relative and whether it is courting. What the signals mean (alarm, a mating call, a trail) is left to evolution. |
 | **Predation** | Prey that fits in a mouth is swallowed whole; anything bigger is bitten. Armour blunts both. Each meal takes time to digest, full predators stop hunting, and close kin are spared unless the predator is starving. |
 | **Metabolism** | Respiration (fermentation when O₂ is low), photosynthesis, chemosynthesis, nutrient uptake, growth, division, starvation, heat and sulfide damage. |
-| **Brains** | NEAT-style networks that grow neurons and synapses through mutation. There are 32 senses (light, gravity, chemistry and chemical gradients, food, strangers and kin, prey colour, pain, water, hydration, rain, an internal clock) and 5 actions (thrust, turn, eat, float, glow). |
-| **Evolution** | Mutation at every division. Species are clustered by genetic distance, and each new species gets a generated Latin name. |
+| **Brains** | NEAT-style networks that grow neurons and synapses through mutation. There are 39 senses (light, gravity, chemistry and chemical gradients, food, strangers and kin, prey colour, pain, water, hydration, rain, pheromones, a courting relative, being ready to breed, an internal clock) and 7 actions (thrust, turn, eat, float, glow, release pheromone A or B). |
+| **Evolution** | Mutation at every birth, recombination when two parents mate. Species are clustered by genetic distance, and each new species gets a generated Latin name. |
+| **Bigger worlds** | The simulation runs in a Web Worker, so drawing and the panels never slow it down, and it keeps running when the tab is in the background. Worlds come in three widths: Standard (one coast), Wide (a continent and an island; the default) and Vast (an archipelago), with the population cap scaled to match. |
 
 ## Controls
 
-- **Drag** to pan, **scroll** to zoom, **click** anything to inspect it (a cell, rock, vent, detritus, water, sky or seafloor).
-- **Space** pauses, **+/−** change speed, **.** steps one tick, **F** follows the selected cell, **H** shows the whole world, **O** cycles overlays.
+- **Drag** to pan, **scroll** to zoom, **click** anything to inspect it (a cell, rock, vent, detritus, water, sky or seafloor). The world always fills the screen: you cannot zoom out or pan past its edges.
+- **Space** pauses, **+/−** change speed, **.** steps one tick, **F** follows the selected cell, **H** zooms all the way out, **O** cycles overlays.
+- **Notifications** (the bell in the header): every event of the world (new species, extinctions, matings, acts of god, lightning) is kept there, with filters, instead of popping up over the world.
 - **Tools** (keys 1–0, X, R, L, G, B): inspect, create life, food, heat, cool, minerals, sulfide, current, rock, vent, smite, rain cloud, lightning, raise land, dig.
-- **Laws of nature**: sunlight, day length, climate, mutation, viscosity, gravity, wind, vent activity, erosion, decay, tides, humidity, storms.
+- **Laws of nature**: sunlight, day length, climate, mutation, viscosity, gravity, wind, vent activity, erosion, decay, tides, humidity, storms, learning, pheromones.
 - **Acts of god**: meteor strike, eruption, nutrient bloom, ice age, heat wave, thunderstorm, drought, mass extinction, seed life.
 - **Click anything**: an organism, rock, vent, detritus, the water, the seafloor, a cloud, a parcel of air, or the land.
+- **Overlays** (O): temperature, O₂, CO₂, nutrients, sulfide, light, flow, humidity and signals (pheromone A violet, B aqua).
+- **Charts**: species, lifestyles, atmosphere, and behaviour (the share of births that are sexual, mean sex drive, learners, signallers).
 - **Tree of life** (T, or the button in the species list): every lineage as a timeline bar; click one to find it.
-- **Save & load** (World panel): download a `.primordial` file, open one, or quick-save in the browser.
+- **World** panel: new world (seed and size), re-seeding, the simulation thread's speed, and save & load (download a `.primordial` file, open one, or quick-save in the browser). Saves from older versions still open.
 
 ## Project layout
 
 ```
 src/sim/      simulation (no DOM): world, fields (sea), atmosphere (weather), soil (land), life, genome, brain, species, serialize
+src/sim/      worker.ts runs it in a Web Worker; sync.ts mirrors it to the main thread; commands.ts is every god action as data
+src/host.ts   where the simulation runs (a worker, or the main thread as a fallback)
 src/render/   WebGL2 renderer: procedural ocean, cells, rocks, bloom
-src/ui/       panels: god panel, inspector (brain + body plan), tree of life, charts, save/load, input
-scripts/      headless runners used for tuning (npx tsx scripts/headless.ts 600 42, scripts/weather.ts for land & weather)
+src/ui/       panels: tool sidebar, header, inspector (brain + body plan), notifications, tree of life, charts, save/load, input
+scripts/      headless runners used for tuning: headless.ts [seconds] [seed] [width], weather.ts (land & weather),
+              phase4.ts (sex, learning, signals), evo.ts (long-run drift), loadsave.ts (open a save file)
 ```
+
+Headless timings under `tsx` are about 4× slower than in the browser; bundle first for real numbers:
+`npx esbuild scripts/phase4.ts --bundle --platform=node --format=esm --outfile=/tmp/p4.mjs && node /tmp/p4.mjs 900 42`.
 
 ## Roadmap
 
 - ~~**Phase 1:** single cells, water, chemistry, brains, god tools, inspector.~~
 - ~~**Phase 2:** multicellular bodies, eyes and chemotaxis, bite attacks, a phylogenetic tree view, save and load.~~
 - ~~**Phase 3:** weather (clouds, rain, storms), land and tides, colonisation of land.~~
-- **Phase 4:** sexual reproduction, learning within a lifetime, signalling, a Web Worker/WASM simulation for bigger worlds.
+- ~~**Phase 4:** sexual reproduction, learning within a lifetime, signalling, a Web Worker simulation for bigger worlds.~~

@@ -1,4 +1,5 @@
 import {
+  Atom,
   Biohazard,
   Bubbles,
   ChevronDown,
@@ -17,6 +18,8 @@ import {
   MousePointer2,
   Mountain,
   MountainSnow,
+  PanelLeftClose,
+  PanelLeftOpen,
   Pickaxe,
   RotateCcw,
   Skull,
@@ -29,10 +32,10 @@ import {
 } from 'lucide';
 import { App, AppModule, Tool } from '../app';
 import { ARCHETYPE_LABELS, Archetype } from '../sim/genome';
-import { GodParams, defaultParams } from '../sim/params';
+import { GodParams, WORLD_SIZES, WorldSize, defaultParams, worldSizeOf } from '../sim/params';
 import { ROCK_TYPES } from '../sim/terrain';
 import { h, icon } from './dom';
-import { downloadWorld, pickWorldFile, quickLoad, quickSave, quickSaveMeta } from './saveLoad';
+import { downloadBlob, pickFile, quickLoad, quickSave, quickSaveMeta } from './saveLoad';
 
 type IconNode = Parameters<typeof icon>[0];
 
@@ -89,9 +92,11 @@ const SLIDERS: SliderDef[] = [
   { key: 'tides', label: 'Tides', min: 0, max: 1.6, step: 0.05, format: (v) => `${v.toFixed(2)}×`, hint: 'How far the sea rises and falls twice a day.' },
   { key: 'humidity', label: 'Humidity', min: 0, max: 3, step: 0.05, format: (v) => `${v.toFixed(2)}×`, hint: 'How much water evaporates: a wet or an arid climate.' },
   { key: 'storms', label: 'Storms', min: 0, max: 3, step: 0.05, format: (v) => `${v.toFixed(2)}×`, hint: 'How violent convection is: thunderstorms and lightning.' },
+  { key: 'learning', label: 'Learning', min: 0, max: 3, step: 0.05, format: (v) => (v === 0 ? 'off' : `${v.toFixed(2)}×`), hint: 'How fast plastic synapses learn from reward during a lifetime (0 = instinct only).' },
+  { key: 'pheromones', label: 'Pheromones', min: 0, max: 3, step: 0.05, format: (v) => (v === 0 ? 'none' : `${v.toFixed(2)}×`), hint: 'How long chemical signals linger in the water (0 = cells cannot signal).' },
 ];
 
-export const OVERLAYS = ['None', 'Temp', 'O₂', 'CO₂', 'Nutrients', 'Sulfide', 'Light', 'Flow', 'Humidity'];
+export const OVERLAYS = ['None', 'Temp', 'O₂', 'CO₂', 'Nutrients', 'Sulfide', 'Light', 'Flow', 'Humidity', 'Signals'];
 
 export class GodPanel implements AppModule {
   readonly root: HTMLElement;
@@ -101,7 +106,12 @@ export class GodPanel implements AppModule {
   private sliderSync: (() => void)[] = [];
   private overlayBtns: HTMLButtonElement[] = [];
   private seedInput: HTMLInputElement;
+  private sizeSelect: HTMLSelectElement;
+  private sizeHint = h('div', { class: 'tool-hint' });
   private autoSeed: HTMLInputElement;
+  private simInfo = h('div', { class: 'tool-hint' });
+  private brandSeed = h('span', { class: 'brand-seed' });
+  private collapseBtn = h('button', { class: 'btn icon-btn collapse-btn', onclick: () => this.toggleCollapsed() });
 
   constructor(private app: App) {
     const tools = h('div', { class: 'tool-grid' });
@@ -123,28 +133,25 @@ export class GodPanel implements AppModule {
     const acts = h(
       'div',
       { class: 'acts' },
-      this.act(CloudLightning, 'Meteor strike', 'A meteor hits the seafloor', () => app.world.meteor()),
-      this.act(Bubbles, 'Eruption', 'Vents surge; CO₂ floods the air', () => app.world.volcanicEruption()),
-      this.act(FlaskConical, 'Nutrient bloom', 'Minerals everywhere', () => app.world.nutrientBloom()),
+      this.act(CloudLightning, 'Meteor strike', 'A meteor hits the seafloor', () => app.cmd({ type: 'act', act: 'meteor' })),
+      this.act(Bubbles, 'Eruption', 'Vents surge; CO₂ floods the air', () => app.cmd({ type: 'act', act: 'eruption' })),
+      this.act(FlaskConical, 'Nutrient bloom', 'Minerals everywhere', () => app.cmd({ type: 'act', act: 'bloom' })),
       this.act(Snowflake, 'Ice age', 'Climate −12 °C', () => {
-        app.world.params.tempOffset = -12;
-        app.world.log('An ice age begins. The climate cools by 12 °C.', 'god');
+        app.setParams({ tempOffset: -12 });
+        app.log('An ice age begins. The climate cools by 12 °C.');
       }),
       this.act(ThermometerSun, 'Heat wave', 'Climate +12 °C', () => {
-        app.world.params.tempOffset = 12;
-        app.world.log('A heat wave grips the world. The climate warms by 12 °C.', 'god');
+        app.setParams({ tempOffset: 12 });
+        app.log('A heat wave grips the world. The climate warms by 12 °C.');
       }),
-      this.act(CloudLightning, 'Thunderstorm', 'Build a storm over the sea', () => app.world.thunderstorm()),
-      this.act(Sun, 'Drought', 'Dry the air and the land', () => app.world.drought()),
-      this.act(Skull, 'Extinction', 'Kill 90% of life', () => app.world.massExtinction(0.9)),
-      this.act(Egg, 'Seed life', 'Scatter new protocells', () => {
-        app.world.seedLife(0.5);
-        app.world.log('New protocells were scattered through the water.', 'god');
-      }),
+      this.act(CloudLightning, 'Thunderstorm', 'Build a storm over the sea', () => app.cmd({ type: 'act', act: 'thunderstorm' })),
+      this.act(Sun, 'Drought', 'Dry the air and the land', () => app.cmd({ type: 'act', act: 'drought' })),
+      this.act(Skull, 'Extinction', 'Kill 90% of life', () => app.cmd({ type: 'act', act: 'extinction' })),
+      this.act(Egg, 'Seed life', 'Scatter new protocells', () => app.cmd({ type: 'act', act: 'seed' })),
       this.act(RotateCcw, 'Reset laws', 'Restore default physics', () => {
         const d = defaultParams();
         d.autoSeed = app.world.params.autoSeed;
-        Object.assign(app.world.params, d);
+        app.setParams(d);
       }),
     );
 
@@ -156,8 +163,17 @@ export class GodPanel implements AppModule {
     });
 
     this.seedInput = h('input', { class: 'input', type: 'number', value: String(app.world.seed), title: 'World seed' });
+    this.sizeSelect = h('select', { class: 'input', title: 'Size of the next world' }) as HTMLSelectElement;
+    for (const [k, v] of Object.entries(WORLD_SIZES)) this.sizeSelect.append(h('option', { value: k }, `${v.label} world`));
+    this.sizeSelect.value = worldSizeOf(app.world.width);
+    const showSize = () => {
+      const def = WORLD_SIZES[this.sizeSelect.value as WorldSize];
+      this.sizeHint.textContent = `${def.hint} ${def.width} µm wide.`;
+    };
+    this.sizeSelect.addEventListener('change', showSize);
+    showSize();
     this.autoSeed = h('input', { type: 'checkbox', checked: app.world.params.autoSeed });
-    this.autoSeed.addEventListener('change', () => (app.world.params.autoSeed = this.autoSeed.checked));
+    this.autoSeed.addEventListener('change', () => app.setParams({ autoSeed: this.autoSeed.checked }));
     const world = h(
       'div',
       { class: 'world-row' },
@@ -177,7 +193,8 @@ export class GodPanel implements AppModule {
         'button',
         {
           class: 'btn primary',
-          onclick: () => app.newWorld(Math.floor(Number(this.seedInput.value) || 1)),
+          onclick: () =>
+            app.newWorld(Math.floor(Number(this.seedInput.value) || 1), WORLD_SIZES[this.sizeSelect.value as WorldSize].width),
         },
         'New world',
       ),
@@ -194,7 +211,14 @@ export class GodPanel implements AppModule {
 
     this.root = h(
       'aside',
-      { id: 'god', class: 'panel' },
+      { id: 'god' },
+      h(
+        'div',
+        { class: 'brand' },
+        h('div', { class: 'logo' }, icon(Atom, 20)),
+        h('div', { class: 'brand-text' }, h('div', { class: 'brand-title' }, 'Primordial'), this.brandSeed),
+        this.collapseBtn,
+      ),
       this.group('Tools', true, tools, this.toolOpts, this.toolHint),
       this.group('Laws of nature', true, sliders),
       this.group('Acts of god', false, acts),
@@ -203,7 +227,10 @@ export class GodPanel implements AppModule {
         'World',
         false,
         world,
+        this.sizeSelect,
+        this.sizeHint,
         h('label', { class: 'check' }, this.autoSeed, 'Re-seed life if everything dies'),
+        this.simInfo,
         h('div', { class: 'sub-title' }, 'Save & load'),
         saveRow,
         this.saveInfo,
@@ -211,6 +238,30 @@ export class GodPanel implements AppModule {
     );
     this.refreshSaveInfo();
     this.setTool(app.tool);
+    this.onWorldChanged();
+    let collapsed = false;
+    try {
+      collapsed = localStorage.getItem('primordial.sidebar') === 'collapsed';
+    } catch {
+      // storage unavailable: start expanded
+    }
+    this.setCollapsed(collapsed);
+  }
+
+  /** Minimise the sidebar to a rail of tool icons (M), or expand it again. */
+  toggleCollapsed() {
+    this.setCollapsed(!this.root.classList.contains('collapsed'));
+  }
+
+  private setCollapsed(on: boolean) {
+    this.root.classList.toggle('collapsed', on);
+    this.collapseBtn.replaceChildren(icon(on ? PanelLeftOpen : PanelLeftClose, 16));
+    this.collapseBtn.title = on ? 'Expand the sidebar (M)' : 'Minimise the sidebar (M)';
+    try {
+      localStorage.setItem('primordial.sidebar', on ? 'collapsed' : 'open');
+    } catch {
+      // not remembered
+    }
   }
 
   private saveInfo = h('div', { class: 'tool-hint' });
@@ -218,8 +269,9 @@ export class GodPanel implements AppModule {
 
   private async refreshSaveInfo() {
     const meta = await quickSaveMeta();
+    const size = meta?.width && meta.width !== 1920 ? `${WORLD_SIZES[worldSizeOf(meta.width)].label.toLowerCase()} world, ` : '';
     this.saveInfo.textContent = meta
-      ? `Quick save: seed ${meta.seed}, day ${meta.day}, ${meta.population} organisms (${new Date(meta.savedAt).toLocaleString()}).`
+      ? `Quick save: ${size}seed ${meta.seed}, day ${meta.day}, ${meta.population} organisms (${new Date(meta.savedAt).toLocaleString()}).`
       : 'No quick save yet.';
   }
 
@@ -229,22 +281,23 @@ export class GodPanel implements AppModule {
     const app = this.app;
     try {
       if (op === 'save') {
-        const size = await downloadWorld(app.world);
-        app.world.log(`World saved to a file (${(size / 1024).toFixed(0)} KB).`, 'info');
+        const blob = await app.host.save();
+        downloadBlob(blob, app.world);
+        app.log(`World saved to a file (${(blob.size / 1024).toFixed(0)} KB).`, 'info');
       } else if (op === 'open') {
-        const w = await pickWorldFile();
-        if (w) app.setWorld(w);
+        const blob = await pickFile();
+        if (blob) await app.host.load(blob);
       } else if (op === 'qsave') {
-        await quickSave(app.world);
-        app.world.log('World quick-saved in this browser.', 'info');
+        await quickSave(await app.host.save(), app.world);
+        app.log('World quick-saved in this browser.', 'info');
         this.refreshSaveInfo();
       } else {
-        const w = await quickLoad();
-        if (w) app.setWorld(w);
-        else app.world.log('There is no quick save yet.', 'info');
+        const blob = await quickLoad();
+        if (blob) await app.host.load(blob);
+        else app.log('There is no quick save yet.', 'info');
       }
     } catch (e) {
-      app.world.log(`Could not ${op === 'save' || op === 'qsave' ? 'save' : 'load'}: ${e instanceof Error ? e.message : e}`, 'extinct');
+      app.log(`Could not ${op === 'save' || op === 'qsave' ? 'save' : 'load'}: ${e instanceof Error ? e.message : e}`, 'extinct');
     } finally {
       this.busy = false;
     }
@@ -276,11 +329,11 @@ export class GodPanel implements AppModule {
     const input = h('input', { type: 'range', min: s.min, max: s.max, step: s.step }) as HTMLInputElement;
     const fmt = s.format ?? ((v: number) => v.toFixed(2));
     input.addEventListener('input', () => {
-      (app.world.params[s.key] as number) = Number(input.value);
+      app.setParams({ [s.key]: Number(input.value) });
       val.textContent = fmt(Number(input.value));
     });
     input.addEventListener('dblclick', () => {
-      (app.world.params[s.key] as number) = defaultParams()[s.key] as number;
+      app.setParams({ [s.key]: defaultParams()[s.key] });
     });
     const sync = () => {
       const v = app.world.params[s.key] as number;
@@ -333,12 +386,21 @@ export class GodPanel implements AppModule {
   }
 
   onWorldChanged() {
+    const w = this.app.world;
+    this.brandSeed.textContent = `seed ${w.seed} · ${WORLD_SIZES[worldSizeOf(w.width)].label.toLowerCase()} world`;
     this.seedInput.value = String(this.app.world.seed);
+    this.sizeSelect.value = worldSizeOf(this.app.world.width);
+    this.sizeSelect.dispatchEvent(new Event('change'));
     this.autoSeed.checked = this.app.world.params.autoSeed;
   }
 
   update(frame: number) {
     this.overlayBtns.forEach((b, i) => b.classList.toggle('active', this.app.overlay === i));
     if (frame % 15 === 0) for (const s of this.sliderSync) s();
+    if (frame % 30 === 0) {
+      const app = this.app;
+      const where = app.host.kind === 'worker' ? 'on its own thread (Web Worker)' : 'on the main thread';
+      this.simInfo.textContent = `Simulating ${where}: ${app.lastStepMs.toFixed(2)} ms per tick, up to ~${Math.round(1000 / Math.max(0.05, app.lastStepMs) / 60)}× real time.`;
+    }
   }
 }

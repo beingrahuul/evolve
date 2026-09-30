@@ -1,6 +1,8 @@
+import { SimHost, createHost, LocalHost } from './host';
+import type { Command } from './sim/commands';
 import { Archetype } from './sim/genome';
 import { Organism } from './sim/organism';
-import { TPS } from './sim/params';
+import { GodParams, WORLD_W } from './sim/params';
 import { Selection, World } from './sim/world';
 import { Camera } from './render/camera';
 import { Renderer } from './render/renderer';
@@ -30,9 +32,9 @@ export interface AppModule {
   onSelection?(): void;
 }
 
-/** Shared application state; UI modules read and mutate it. */
+/** Shared application state. UI modules read the world and change it only through commands. */
 export class App {
-  world: World;
+  host: SimHost;
   readonly camera = new Camera();
   tool: Tool = 'inspect';
   brush = 55;
@@ -50,25 +52,69 @@ export class App {
   fps = 60;
   tps = 0;
   lastStepMs = 0;
-  private acc = 0;
   readonly modules: AppModule[] = [];
 
   constructor(
     readonly renderer: Renderer,
     seed: number,
+    width: number,
   ) {
-    this.world = new World(seed);
+    this.host = createHost(seed, width);
+    this.attach(this.host);
   }
 
-  newWorld(seed: number) {
-    this.setWorld(new World(seed, { ...this.world.params }));
+  /** The world being shown (in worker mode, the main thread's copy of the simulated one). */
+  get world(): World {
+    return this.host.world;
   }
 
-  /** Swap in a different world (new or loaded). */
+  get ready(): boolean {
+    return this.host.ready;
+  }
+
+  private attach(host: SimHost) {
+    host.onReset = (w) => this.setWorld(w);
+    host.onSelect = (id) => {
+      const o = this.world.orgById.get(id);
+      if (o) this.selectOrganism(o);
+    };
+    host.onFail = (msg) => {
+      // no worker: simulate on this thread instead
+      console.warn(`Simulation worker unavailable (${msg}); running on the main thread.`);
+      const w = this.world;
+      this.host = new LocalHost(w.seed, WORLD_W, { ...w.params });
+      this.attach(this.host);
+      this.setWorld(this.host.world);
+    };
+  }
+
+  /** Change the world through a command (runs on the simulation thread). */
+  cmd(c: Command) {
+    this.host.cmd(c);
+  }
+
+  /** Change laws of nature: applied here at once (for the sliders) and sent to the simulation. */
+  setParams(patch: Partial<GodParams>) {
+    Object.assign(this.world.params, patch);
+    this.host.cmd({ type: 'params', params: { ...this.world.params } });
+  }
+
+  log(text: string, kind: 'god' | 'info' | 'extinct' = 'god') {
+    this.cmd({ type: 'log', text, kind });
+  }
+
+  newWorld(seed: number, width = this.world.width) {
+    this.host.newWorld(seed, width, { ...this.world.params });
+  }
+
+  /** A different world (new or loaded) replaced the current one. */
   setWorld(w: World) {
-    this.world = w;
     this.select(null);
     this.highlightSpecies = -1;
+    if (this.renderer.worldWidth !== w.width) {
+      this.camera.setViewport(this.camera.viewW, this.camera.viewH);
+      this.camera.fit();
+    }
     for (const m of this.modules) m.onWorldChanged?.();
   }
 
@@ -84,36 +130,15 @@ export class App {
     this.follow = follow;
   }
 
-  /** Run as many ticks as the speed setting asks for, within a time budget. */
+  /** Advance the simulation for this animation frame. */
   simulate(dtReal: number) {
-    if (this.paused) {
-      this.tps = 0;
-      return;
-    }
-    const budget = this.speed === Infinity ? 26 : 16;
-    let wanted: number;
-    if (this.speed === Infinity) wanted = 100000;
-    else {
-      this.acc = Math.min(this.acc + dtReal * TPS * this.speed, TPS * this.speed * 0.25);
-      wanted = Math.floor(this.acc);
-      this.acc -= wanted;
-    }
-    const t0 = performance.now();
-    let n = 0;
-    while (n < wanted) {
-      this.world.step();
-      n++;
-      if (performance.now() - t0 > budget) {
-        this.acc = 0;
-        break;
-      }
-    }
-    if (n > 0) this.lastStepMs = (performance.now() - t0) / n;
-    const inst = n / Math.max(1e-3, dtReal);
-    this.tps = this.tps * 0.9 + inst * 0.1;
+    // the selected organism's id, even once dead (the simulation then says what killed it)
+    this.host.frame(dtReal, this.speed, this.paused, this.selectedOrg ? this.selectedOrg.id : -1);
+    this.tps = this.paused ? 0 : this.host.tps;
+    this.lastStepMs = this.host.stepMs;
   }
 
   stepOnce() {
-    this.world.step();
+    this.host.step();
   }
 }

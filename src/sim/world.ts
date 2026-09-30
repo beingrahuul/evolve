@@ -20,6 +20,7 @@ import {
   WORLD_H,
   WORLD_W,
   defaultParams,
+  setWorldWidth,
 } from './params';
 import { Soil } from './soil';
 import { Particles } from './particles';
@@ -53,7 +54,15 @@ export type FieldBrush = 'heat' | 'cool' | 'nutrients' | 'sulfide';
 
 const ANNOUNCE_AT = 12;
 
+/** Create a world of the given width (bigger worlds are wider). */
+export function makeWorld(seed: number, params?: GodParams, width = 1920): World {
+  setWorldWidth(width);
+  return new World(seed, params);
+}
+
 export class World {
+  /** Width of this world; bound by setWorldWidth() before it was constructed. */
+  readonly width = WORLD_W;
   readonly rng: Rng;
   params: GodParams;
   tick = 0;
@@ -87,6 +96,12 @@ export class World {
   deathCauses = new Map<string, number>();
   archSpecies = new Map<Archetype, number>();
   private lastBoltLog = -1e9;
+  /** Births since the last stats sample: from two parents, or one. */
+  birthsSexual = 0;
+  birthsClonal = 0;
+  totalMatings = 0;
+  /** Causes of recent deaths, so the inspector can say what became of an organism it was showing. */
+  readonly recentDeaths = new Map<number, string>();
 
   /** `blank` skips world generation (used when restoring a saved world). */
   constructor(
@@ -295,9 +310,26 @@ export class World {
     for (const b of births) this.addOrganism(b);
   }
 
+  recordBirth(sexual: boolean) {
+    if (sexual) this.birthsSexual++;
+    else this.birthsClonal++;
+  }
+
+  onMating(a: Organism, b: Organism) {
+    this.totalMatings++;
+    if (this.totalMatings === 1) {
+      const sa = this.species.get(a.species);
+      const sb = this.species.get(b.species);
+      const who = sa && sb && sa !== sb ? `a ${sa.name} and a ${sb.name}` : `two ${sa ? sa.name : 'cells'}`;
+      this.log(`The first mating: ${who} exchanged genes. Their young carry a mix of both parents.`, 'species');
+    }
+  }
+
   private onRemoved(o: Organism) {
     this.orgById.delete(o.id);
     this.totalDied++;
+    this.recentDeaths.set(o.id, o.cause);
+    if (this.recentDeaths.size > 256) this.recentDeaths.delete(this.recentDeaths.keys().next().value!);
     const cause = o.cause.startsWith('Eaten') ? 'Eaten' : o.cause || 'Unknown';
     this.deathCauses.set(cause, (this.deathCauses.get(cause) ?? 0) + 1);
     const sp = this.species.get(o.species);
@@ -456,15 +488,19 @@ export class World {
 
   seedLife(scale: number) {
     const r = this.rng;
-    const n = (k: number) => Math.max(1, Math.round(k * scale));
-    // tide-pool pioneers along the beach
+    // bigger worlds get proportionally more founders
+    const wide = WORLD_W / 1920;
+    const n = (k: number) => Math.max(1, Math.round(k * scale * wide));
+    // tide-pool pioneers along the beaches
+    const shores = this.terrain.shores.length ? this.terrain.shores : [{ x: this.terrain.coastX, dir: this.terrain.landRight ? 1 : -1 }];
     for (let i = 0; i < n(18); i++) {
-      const x = this.terrain.coastX + (this.terrain.landRight ? 1 : -1) * r.range(-40, 70);
+      const sh = shores[i % shores.length];
+      const x = sh.x + sh.dir * r.range(-40, 70);
       this.spawn('pioneer', x, Math.min(this.terrain.floorY(x) - 8, this.seaLevel + r.range(2, 30)));
     }
     for (let i = 0; i < n(140); i++) this.spawn('photo', this.seaX(), this.seaLevel + r.range(15, 260));
     for (const v of this.terrain.vents) {
-      for (let i = 0; i < n(12); i++) this.spawn('chemo', v.x + r.range(-60, 60), v.y - r.range(15, 90));
+      for (let i = 0; i < Math.max(1, Math.round(12 * scale)); i++) this.spawn('chemo', v.x + r.range(-60, 60), v.y - r.range(15, 90));
     }
     for (let i = 0; i < n(8); i++) this.spawn('grazer', this.seaX(), this.seaLevel + r.range(30, 300));
     for (let i = 0; i < n(3); i++) this.spawn('hunter', this.seaX(200), this.seaLevel + r.range(40, 400));
@@ -475,6 +511,9 @@ export class World {
     for (let i = 0; i < n(20); i++) this.spawn('random', this.seaX(), this.seaLevel + r.range(20, WORLD_H - 150));
     for (let i = 0; i < n(14); i++) this.spawn('colony', this.seaX(), this.seaLevel + r.range(20, 220));
     for (let i = 0; i < n(2); i++) this.spawn('stalker', this.seaX(200), this.seaLevel + r.range(60, 380));
+    // a school of shoalers, together so they can find mates
+    const sx = this.seaX(200);
+    for (let i = 0; i < n(8); i++) this.spawn('shoaler', sx + r.range(-80, 80), this.seaLevel + r.range(40, 160));
   }
 
   /** Create a new organism from an archetype (or a given genome). */
@@ -529,6 +568,7 @@ export class World {
       o.species = sp.id;
     }
     o.setGenome(g);
+    o.genomeDirty = true;
     if (o.mass > g.divMass) o.mass = g.divMass * 0.9;
     o.updateSize();
   }

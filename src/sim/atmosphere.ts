@@ -2,9 +2,16 @@ import { AIR, AIR_CELL, AIR_NX, AIR_NY, AIR_TOP, GodParams, WORLD_W } from './pa
 import { Rng } from './rng';
 import { Terrain } from './terrain';
 
-const N = AIR_NX * AIR_NY;
-const NA = N + 1;
-const DUMMY = N;
+// Grid size, bound when an Atmosphere is created (the world width is chosen per world).
+let N = 0;
+let NA = 0;
+let DUMMY = 0;
+function bindGrid(): number {
+  N = AIR_NX * AIR_NY;
+  NA = N + 1;
+  DUMMY = N;
+  return N;
+}
 
 /** Saturation vapour (g/kg) at temperature T (°C) — Clausius-Clapeyron-like. */
 export const qsat = (T: number) => 3.8 * Math.exp(0.067 * Math.max(-40, Math.min(45, T)));
@@ -24,6 +31,8 @@ export interface Bolt {
  * Warm air rises, rising air cools, vapour condenses into cloud (releasing heat), cloud rains out.
  */
 export class Atmosphere {
+  /** Number of air cells (binds the module's grid size first, so it must stay the first field). */
+  readonly size = bindGrid();
   u = new Float32Array(NA);
   v = new Float32Array(NA);
   temp = new Float32Array(NA);
